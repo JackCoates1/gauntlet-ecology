@@ -33,6 +33,32 @@ def test_generation_lineage_returns_selection_and_score_trend(client, seeded_ids
     }]
 
 
+def test_list_matches(client, seeded_ids):
+    response = client.get("/matches")
+    assert response.status_code == 200
+    body = response.json()
+    assert body == [
+        {
+            "id": seeded_ids["match_id"],
+            "generation_id": seeded_ids["generation_id"],
+            "generation_number": 1,
+            "status": "completed",
+            "seed": 99,
+            "scheduled_at": body[0]["scheduled_at"],
+            "completed_at": None,
+            "attacker_name": "Red Team One",
+            "defender_name": "Blue Team One",
+            "attacker_points": 7.5,
+            "defender_points": 3.0,
+            "availability_points": 2.0,
+            "exploit_classification": None,
+        }
+    ]
+    filtered = client.get(f"/matches?generation_id={seeded_ids['generation_id']}")
+    assert filtered.status_code == 200
+    assert filtered.json() == body
+
+
 def test_get_match(client, seeded_ids):
     response = client.get(f"/matches/{seeded_ids['match_id']}")
     assert response.status_code == 200
