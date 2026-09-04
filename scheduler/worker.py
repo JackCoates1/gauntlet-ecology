@@ -67,7 +67,7 @@ def claim_job(connection: psycopg.Connection, *, worker_id: str, lease_seconds: 
                     SELECT id
                     FROM jobs
                     WHERE status = 'queued'
-                       OR (status = 'leased' AND lease_until < now())
+                       OR (status IN ('leased', 'running') AND lease_until < now())
                     ORDER BY created_at, id
                     FOR UPDATE SKIP LOCKED
                     LIMIT 1
