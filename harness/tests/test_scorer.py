@@ -43,6 +43,20 @@ def test_policy_violation_zeroes_attack_quality():
     assert score_event_log(log)["attack_quality"]["attacker"] == 0
 
 
+def test_attacker_exception_zeroes_attack_quality_with_a_visible_reason():
+    log = {
+        "challenge": {"id": "protected-note-vault", "secret_flag": "FLAG{x}"},
+        "status": {"attacker_error": "broken strategy"},
+        "events": [
+            {"type": "request", "source": "attacker", "contract_valid": True, "reached_boundary": True,
+             "technique": "admin-id-boundary", "response": "no"},
+        ],
+    }
+    score = score_event_log(log)
+    assert score["attack_quality"]["attacker"] == 0
+    assert "invalid attacker strategy: broken strategy" in score["reasons"]
+
+
 def test_score_is_byte_identical_for_same_event_log():
     log = {
         "challenge": {"id": "protected-note-vault", "secret_flag": "FLAG{x}"},

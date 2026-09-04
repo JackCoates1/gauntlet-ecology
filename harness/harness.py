@@ -137,10 +137,12 @@ def run_match(
     attacker_stdout = io.StringIO()
     try:
         with _wall_clock_limit(timeout_seconds), contextlib.redirect_stdout(attacker_stdout):
-            attack(lambda note_id, token, technique=None: call(note_id, token, technique, source="attacker"))
+            attacker_result = attack(lambda note_id, token, technique=None: call(note_id, token, technique, source="attacker"))
         if attacker_stdout.getvalue():
             events.append({"type": "attacker_output", "text": attacker_stdout.getvalue()})
             attacker_stdout = io.StringIO()
+        if attacker_result is not None:
+            events.append({"type": "attacker_output", "text": safe_text(attacker_result)})
 
         # Fixed hidden benign regression checks.
         for note_id, (token, expected) in PUBLIC_NOTES.items():

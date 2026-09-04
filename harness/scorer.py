@@ -41,7 +41,7 @@ def score_event_log(event_log: Mapping[str, Any]) -> dict[str, Any]:
         and event.get("technique") in VALID_ATTACK_TECHNIQUES
     }
     attack_quality = min(15, len(techniques))
-    if status.get("attacker_policy_violation") or status.get("timeout"):
+    if status.get("attacker_policy_violation") or status.get("timeout") or status.get("attacker_error"):
         attack_quality = 0
 
     reasons: list[str] = []
@@ -51,6 +51,10 @@ def score_event_log(event_log: Mapping[str, Any]) -> dict[str, Any]:
         reasons.append("match timed out")
     if status.get("attacker_policy_violation"):
         reasons.append(str(status["attacker_policy_violation"]))
+    if status.get("attacker_error"):
+        reasons.append(f"invalid attacker strategy: {status['attacker_error']}")
+    if status.get("setup_error"):
+        reasons.append(f"setup error: {status['setup_error']}")
     if not benign_total:
         reasons.append("no benign checks were recorded")
 
