@@ -270,7 +270,10 @@ def _redact(value: Any, secret: str) -> Any:
     if isinstance(value, list):
         return [_redact(item, secret) for item in value]
     if isinstance(value, str):
-        return value.replace(secret, "[REDACTED]")
+        # PostgreSQL text/JSONB cannot store a literal NUL. Generated attack
+        # probes are adversarial input, so retain the evidence in a safe,
+        # explicit representation rather than letting persistence abort.
+        return value.replace(secret, "[REDACTED]").replace("\x00", "[NUL]")
     return value
 
 
@@ -443,6 +446,10 @@ def process_one(
         else:
             raise ValueError(f"unsupported job type {job['type']!r}")
     except Exception as error:
+        # A failed event/score insert can leave PostgreSQL's current
+        # transaction aborted. Clear it before persisting the job failure so a
+        # lease is never stranded merely because its work raised an error.
+        connection.rollback()
         _finish_job(connection, job["id"], worker_id, error=error)
         raise
     _finish_job(connection, job["id"], worker_id)
