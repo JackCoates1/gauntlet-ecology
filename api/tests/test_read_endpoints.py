@@ -9,7 +9,7 @@ def test_get_generation(client, seeded_ids):
     response = client.get(f"/generations/{seeded_ids['generation_id']}")
     assert response.status_code == 200
     body = response.json()
-    assert body["challenge_semver"] == "0.1.0"
+    assert body["challenge_semver"] == "1.0.0"
     assert {strategy["display_name"] for strategy in body["strategies"]} == {
         "Red Team One",
         "Blue Team One",

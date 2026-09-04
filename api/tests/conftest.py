@@ -22,7 +22,7 @@ def reset_database() -> dict[str, str]:
         connection.execute((ROOT / "schema" / "seed.sql").read_text())
 
         challenge_id = connection.execute(
-            "SELECT id FROM challenge_versions WHERE semver = '0.1.0'"
+            "SELECT id FROM challenge_versions WHERE semver = '1.0.0'"
         ).fetchone()[0]
         generation_id, attacker_agent_id, defender_agent_id = uuid4(), uuid4(), uuid4()
         attacker_strategy_id, defender_strategy_id, match_id = uuid4(), uuid4(), uuid4()
