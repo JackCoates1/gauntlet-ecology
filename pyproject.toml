@@ -16,6 +16,9 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["httpx>=0.27,<1.0", "pytest>=8.0,<9.0"]
 
+[tool.setuptools.packages.find]
+include = ["api*"]
+
 [tool.pytest.ini_options]
 testpaths = ["api/tests", "schema/tests"]
 addopts = "-ra"
