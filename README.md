@@ -25,15 +25,18 @@ for migration in schema/migrations/*.sql; do psql "$DATABASE_URL" -v ON_ERROR_ST
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema/seed.sql
 ```
 
-Run the read-only API:
+Run the read-only API and live web UI:
 
 ```bash
 python -m pip install -e '.[dev]'
-uvicorn api.main:app --reload
+uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
 The API uses `DATABASE_URL` and exposes `GET /generations`, `GET /generations/{id}`,
-`GET /matches/{id}`, and `GET /leaderboard`. There are deliberately no write endpoints yet.
+`GET /matches`, `GET /matches/{id}`, and `GET /leaderboard`. There are deliberately no write
+endpoints. The same FastAPI process serves the static live UI at `http://<LAN-host-IP>:8000/`;
+it is LAN-only unless a separate public-routing decision is made. See
+[`web/README.md`](web/README.md) for the UI run notes.
 
 Run the integration tests against a fresh local schema (the database must be running):
 
