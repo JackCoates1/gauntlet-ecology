@@ -1,0 +1,12 @@
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+.coverage
+*.py[cod]
+*.egg-info/
+dist/
+build/
+
+# Local Postgres data used only by docker-compose.dev.yml
+.postgres-data/
