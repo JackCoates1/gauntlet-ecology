@@ -21,6 +21,10 @@ template asks for `def attack(request):` and describes the optional
 template asks for `def read_note(note_id, token):`, requires a string response,
 and explains that `SECRET_FLAG` appears only after module import.
 
+`build_prompt(role, prior_generation_context=None)` also accepts optional
+untrusted, scored lineage context for the continuous evolution loop. Omitting
+it preserves the original prompt exactly.
+
 Codex is invoked ephemerally with model `gpt-5.6-terra`, reasoning effort
 `medium`, and `--output-last-message`. The last-message file is used rather
 than terminal output, and a Markdown fence is removed if the model ignored the

@@ -41,13 +41,18 @@ def connect(database_url: str | None = None) -> psycopg.Connection:
 
 
 def enqueue_job(connection: psycopg.Connection, *, job_type: str, idempotency_key: str, payload_ref: str) -> dict[str, Any]:
-    """Insert a job exactly once and return its authoritative row."""
+    """Insert a job exactly once, reviving only a previously failed retry."""
     with connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO jobs (type, idempotency_key, payload_ref)
             VALUES (%s, %s, %s)
-            ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+            ON CONFLICT (idempotency_key) DO UPDATE SET
+              status = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN 'queued' ELSE jobs.status END,
+              lease_owner = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.lease_owner END,
+              lease_until = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.lease_until END,
+              error_class = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.error_class END,
+              updated_at = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN now() ELSE jobs.updated_at END
             RETURNING *
             """,
             (job_type, idempotency_key, payload_ref),
@@ -55,6 +60,30 @@ def enqueue_job(connection: psycopg.Connection, *, job_type: str, idempotency_ke
         row = cursor.fetchone()
     connection.commit()
     assert row is not None
+    return row
+
+
+def reclaim_own_running_job(connection: psycopg.Connection, *, idempotency_key: str, worker_id: str) -> dict[str, Any] | None:
+    """Requeue an interrupted local CLI job without stealing another worker's lease.
+
+    Normal workers rely on lease expiry.  A loop CLI is commonly restarted with
+    the same stable ``worker_id`` after its process was killed, so this narrow
+    recovery path avoids an unnecessary wait while retaining ownership safety.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE jobs
+            SET status = 'queued', lease_owner = NULL, lease_until = NULL,
+                updated_at = now()
+            WHERE idempotency_key = %s AND status IN ('leased', 'running')
+              AND lease_owner = %s
+            RETURNING *
+            """,
+            (idempotency_key, worker_id),
+        )
+        row = cursor.fetchone()
+    connection.commit()
     return row
 
 
@@ -241,13 +270,18 @@ def _redact(value: Any, secret: str) -> Any:
     if isinstance(value, list):
         return [_redact(item, secret) for item in value]
     if isinstance(value, str):
-        return value.replace(secret, "[REDACTED]")
+        # PostgreSQL text/JSONB cannot store a literal NUL. Generated attack
+        # probes are adversarial input, so retain the evidence in a safe,
+        # explicit representation rather than letting persistence abort.
+        return value.replace(secret, "[REDACTED]").replace("\x00", "[NUL]")
     return value
 
 
 def _insert_events(connection: psycopg.Connection, match_id: UUID, event_log: dict[str, Any]) -> str:
     secret = str(event_log["challenge"]["secret_flag"])
-    previous: str | None = None
+    # Hashes are globally unique in the schema.  Seed each per-match chain so
+    # two reproducible matches with identical redacted events do not collide.
+    previous: str | None = "sha256:" + hashlib.sha256(f"match:{match_id}".encode()).hexdigest()
     with connection.cursor() as cursor:
         for sequence, event in enumerate(event_log["events"]):
             payload = _redact(event, secret)
@@ -392,17 +426,30 @@ def generation_summary(connection: psycopg.Connection, *, number: int) -> Genera
     return GenerationSummary(generation["id"], generation["number"], match_count, score_count, match_count == score_count and match_count == 2)
 
 
-def process_one(connection: psycopg.Connection, *, worker_id: str) -> GenerationSummary | None:
+def process_one(
+    connection: psycopg.Connection,
+    *,
+    worker_id: str,
+    handlers: dict[str, Callable[[psycopg.Connection, dict[str, Any]], Any]] | None = None,
+) -> Any | None:
+    """Claim and execute one durable job, with optional additive job handlers."""
     job = claim_job(connection, worker_id=worker_id)
     if job is None:
         return None
     _mark_running(connection, job["id"], worker_id)
     try:
-        if job["type"] != "run_generation":
-            raise ValueError(f"unsupported job type {job['type']!r}")
         payload = json.loads(job["payload_ref"])
-        summary = run_generation(connection, challenge_semver=payload["challenge_semver"], number=int(payload["number"]))
+        if job["type"] == "run_generation":
+            summary = run_generation(connection, challenge_semver=payload["challenge_semver"], number=int(payload["number"]))
+        elif handlers is not None and job["type"] in handlers:
+            summary = handlers[job["type"]](connection, payload)
+        else:
+            raise ValueError(f"unsupported job type {job['type']!r}")
     except Exception as error:
+        # A failed event/score insert can leave PostgreSQL's current
+        # transaction aborted. Clear it before persisting the job failure so a
+        # lease is never stranded merely because its work raised an error.
+        connection.rollback()
         _finish_job(connection, job["id"], worker_id, error=error)
         raise
     _finish_job(connection, job["id"], worker_id)

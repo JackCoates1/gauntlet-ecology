@@ -78,6 +78,57 @@ def get_generation(
         return generation
 
 
+@app.get("/generations/{generation_id}/lineage")
+def generation_lineage(
+    generation_id: UUID, connection: Connection = Depends(get_connection)
+) -> dict:
+    """Show selected parents and the attacker/defender score trend to this generation."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT id, number, challenge_version_id FROM generations WHERE id = %s""",
+            (generation_id,),
+        )
+        generation = cursor.fetchone()
+        if generation is None:
+            raise HTTPException(status_code=404, detail="generation not found")
+        cursor.execute(
+            """
+            SELECT sd.eligible_match_ids, sd.aggregate_metrics,
+                   sd.diversity_score::double precision AS diversity_score,
+                   sd.ranking_seed, sd.selected_parent_strategy_ids, sd.created_at
+            FROM selection_decisions AS sd
+            WHERE sd.generation_id = %s
+            ORDER BY sd.created_at, sd.id LIMIT 1
+            """,
+            (generation_id,),
+        )
+        decision = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT g.id AS generation_id, g.number,
+                   count(s.id)::integer AS scored_matches,
+                   avg(s.attacker_points)::double precision AS average_attacker_points,
+                   avg(s.defender_points + s.availability_points)::double precision AS average_defender_points,
+                   count(*) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS attacker_wins,
+                   count(*) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS defender_wins
+            FROM generations AS g
+            LEFT JOIN matches AS m ON m.generation_id = g.id AND m.status = 'completed'
+            LEFT JOIN scores AS s ON s.match_id = m.id
+            WHERE g.challenge_version_id = %s AND g.number <= %s
+            GROUP BY g.id
+            ORDER BY g.number
+            """,
+            (generation["challenge_version_id"], generation["number"]),
+        )
+        trend = cursor.fetchall()
+    return {
+        "generation_id": generation["id"],
+        "generation_number": generation["number"],
+        "selection_decision": decision,
+        "trend": trend,
+    }
+
+
 @app.get("/matches/{match_id}")
 def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) -> dict:
     """Get a match, both competitors, score, and execution summaries."""
