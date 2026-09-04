@@ -10,6 +10,8 @@ generated strategies must eventually be packaged as runnable sandbox artifacts.
 from __future__ import annotations
 
 import hashlib
+import gzip
+import base64
 import json
 from dataclasses import dataclass
 from pathlib import Path
@@ -135,14 +137,16 @@ def sandbox_program(attacker: FixtureStrategy, defender: FixtureStrategy, *, sec
     """Return a self-contained program whose stdout is an infra attestation plus log."""
     if attacker.role != "attacker" or defender.role != "defender":
         raise ValueError("fixture roles do not form an attacker/defender match")
-    event_log = json.dumps(fixture_event_log(attacker, defender, secret=secret), sort_keys=True, separators=(",", ":"))
-    # The inputs are generated JSON, so the shell literal is safe (the fixture text
-    # contains no apostrophes).  Keeping this program data-only prevents strategy
-    # source from being evaluated on the scheduler host.
+    event_log = json.dumps(fixture_event_log(attacker, defender, secret=secret), sort_keys=True, separators=(",", ":")).encode()
+    # The serial protocol has a deliberately conservative line size.  A leaky
+    # log repeats its per-match flag often enough to exceed it, so pass the
+    # deterministic event log as a compressed BusyBox payload.  Decompression
+    # happens inside the sandbox; strategy source is never evaluated on host.
+    payload = base64.b64encode(gzip.compress(event_log, mtime=0)).decode()
     return "\n".join(
         (
             "#!/bin/sh",
             'printf "SCHEDULER_INFRA_LIMITS cpu_seconds=%s processes=%s file_blocks=%s virtual_kib=%s\\n" "$(ulimit -t)" "$(ulimit -u)" "$(ulimit -f)" "$(ulimit -v)"',
-            "printf '%s\\n' '" + event_log + "'",
+            "printf 'SCHEDULER_EVENT_LOG_GZIP_BASE64 %s\\n' '" + payload + "'",
         )
     )

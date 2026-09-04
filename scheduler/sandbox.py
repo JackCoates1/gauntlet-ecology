@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import hashlib
+import base64
+import gzip
 import json
 import re
 import subprocess
@@ -15,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 RUNNER = ROOT / "infra" / "run_sandboxed.sh"
 _RESULT = re.compile(r"ECOLOGY_RESULT\s+(?P<fields>.+)")
 _LIMITS = re.compile(r"SCHEDULER_INFRA_LIMITS\s+(?P<fields>.+)")
+_EVENT_LOG = re.compile(r"SCHEDULER_EVENT_LOG_GZIP_BASE64\s+(?P<payload>[A-Za-z0-9+/=]+)")
 
 
 @dataclass(frozen=True)
@@ -42,16 +45,13 @@ def _runner_image_digest() -> str:
 
 
 def _extract_event_log(output: str) -> dict[str, Any]:
-    begin = "ECOLOGY_STDOUT_BEGIN"
-    end = "ECOLOGY_STDOUT_END"
+    match = _EVENT_LOG.search(output)
+    if match is None:
+        raise RuntimeError("sandbox output did not contain an encoded event log")
     try:
-        body = output.split(begin, 1)[1].split("\n", 1)[1].split(end, 1)[0]
-    except IndexError as error:
-        raise RuntimeError("sandbox output did not contain a stdout envelope") from error
-    for line in body.splitlines():
-        if line.startswith("{"):
-            return json.loads(line)
-    raise RuntimeError("sandbox output did not contain an event log")
+        return json.loads(gzip.decompress(base64.b64decode(match.group("payload"))))
+    except (ValueError, OSError, json.JSONDecodeError) as error:
+        raise RuntimeError("sandbox event-log payload was not valid gzip JSON") from error
 
 
 def run(program: str) -> SandboxResult:

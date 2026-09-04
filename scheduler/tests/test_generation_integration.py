@@ -60,8 +60,9 @@ def test_full_generation_uses_postgres_and_real_sandbox(scheduler_database_url):
 
 
 def test_generation_job_and_rows_are_idempotent(scheduler_database_url):
-    # The same key returns the existing succeeded job, so no second sandbox run
-    # and no duplicate match, score, or bootstrap-decision is possible.
+    # The preceding full generation run used this exact key.  A second run
+    # returns the existing succeeded job, so no second sandbox run and no
+    # duplicate match, score, or decision is possible.
     assert _run_once(scheduler_database_url) is None
     with connect(scheduler_database_url) as connection:
         assert connection.execute("SELECT count(*) FROM jobs").fetchone()["count"] == 1
