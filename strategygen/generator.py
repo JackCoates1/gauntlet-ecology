@@ -140,6 +140,8 @@ def generate_attempt(
 ) -> GenerationAttempt:
     """Generate and statically validate one strategy attempt, never importing it on the host."""
     contract = role_contract(role)
+    if contract.output_kind != "python":
+        raise ValueError(f"{role!r} emits {contract.output_kind}, use its dedicated generator")
     started_at = datetime.now(UTC).isoformat()
     raw_output, wall_time_ms, command_error = invoker(build_prompt(role))
     source = extract_python(raw_output, contract)
