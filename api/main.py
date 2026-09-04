@@ -1,11 +1,15 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from pathlib import Path
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from psycopg import Connection
 
 from api.db import get_connection, pool
+
+WEB_DIRECTORY = Path(__file__).resolve().parents[1] / "web"
 
 
 @asynccontextmanager
@@ -78,6 +82,39 @@ def get_generation(
         return generation
 
 
+@app.get("/matches")
+def list_matches(
+    generation_id: UUID | None = None,
+    connection: Connection = Depends(get_connection),
+) -> list[dict]:
+    """List the most recently scheduled matches, optionally for one generation."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT m.id, m.generation_id, g.number AS generation_number, m.status,
+                   m.seed, m.scheduled_at, m.completed_at,
+                   attacker_agent.display_name AS attacker_name,
+                   defender_agent.display_name AS defender_name,
+                   s.attacker_points::double precision AS attacker_points,
+                   s.defender_points::double precision AS defender_points,
+                   s.availability_points::double precision AS availability_points,
+                   s.exploit_classification
+            FROM matches AS m
+            JOIN generations AS g ON g.id = m.generation_id
+            JOIN strategies AS attacker_strategy ON attacker_strategy.id = m.attacker_strategy_id
+            JOIN agents AS attacker_agent ON attacker_agent.id = attacker_strategy.agent_id
+            JOIN strategies AS defender_strategy ON defender_strategy.id = m.defender_strategy_id
+            JOIN agents AS defender_agent ON defender_agent.id = defender_strategy.agent_id
+            LEFT JOIN scores AS s ON s.match_id = m.id
+            WHERE (%s::uuid IS NULL OR m.generation_id = %s)
+            ORDER BY COALESCE(m.completed_at, m.scheduled_at) DESC, m.id
+            LIMIT 100
+            """,
+            (generation_id, generation_id),
+        )
+        return cursor.fetchall()
+
+
 @app.get("/matches/{match_id}")
 def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) -> dict:
     """Get a match, both competitors, score, and execution summaries."""
@@ -142,3 +179,7 @@ def leaderboard(connection: Connection = Depends(get_connection)) -> list[dict]:
             """
         )
         return cursor.fetchall()
+
+
+# Mounted last so API and documentation routes continue to take precedence.
+app.mount("/", StaticFiles(directory=WEB_DIRECTORY, html=True), name="web")
