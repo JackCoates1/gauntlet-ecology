@@ -25,3 +25,16 @@ def test_secure_fixture_keeps_secret_confidential():
     score = score_event_log(log)
     assert score["leaked"] is False
     assert score["confidentiality"] == {"defender": 60, "attacker": 0}
+
+
+def test_explicit_baseline_scenario_keeps_the_existing_match_behavior():
+    log = run_match(
+        FIXTURES / "leaky_defender.py",
+        FIXTURES / "cautious_attacker.py",
+        secret_flag="FLAG{test}",
+        scenario_config={"request_budget": 20, "decoy_note_count": 0, "token_length": 16},
+    )
+
+    assert log["status"]["finished"] == "completed"
+    assert log["status"]["requests_used"] == 3
+    assert log["challenge"]["scenario_config"] == {"request_budget": 20, "decoy_note_count": 0, "token_length": 16}
