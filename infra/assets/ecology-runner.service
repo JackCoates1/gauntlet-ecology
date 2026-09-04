@@ -1,7 +1,11 @@
 [Unit]
-Description=Gauntlet Ecology serial gVisor runner
-After=cloud-final.service
-Wants=cloud-final.service
+Description=Gauntlet Ecology serial namespace runner
+# ttyS0 is a command protocol, never an interactive login console.  Masking
+# serial-getty@ttyS0 below is defence in depth; this explicit conflict also
+# prevents a manually-started getty from contending for the serial device.
+After=local-fs.target
+Before=getty.target serial-getty@ttyS0.service
+Conflicts=serial-getty@ttyS0.service
 
 [Service]
 Type=simple
@@ -12,6 +16,7 @@ StandardOutput=tty
 StandardError=tty
 TTYPath=/dev/ttyS0
 TTYReset=yes
+TTYVHangup=no
 
 [Install]
 WantedBy=multi-user.target

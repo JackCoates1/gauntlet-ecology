@@ -22,6 +22,8 @@ import sys
 import uuid
 from pathlib import Path
 
+sys.path.insert(0, "/scratch/strategy")
+
 from harness.challenge import CHALLENGE_ID, CHALLENGE_VERSION
 from harness.harness import run_match
 
@@ -98,7 +100,7 @@ def sandbox_program(*, attacker_source: str, defender_source: str, mode: str, se
             "#!/bin/sh",
             "set -eu",
             "mkdir -p /scratch/strategy",
-            "base64 -d <<'ECOLOGY_STRATEGY_ARCHIVE' | gunzip | tar -x -C /scratch/strategy",
+            "/bin/busybox base64 -d <<'ECOLOGY_STRATEGY_ARCHIVE' | /bin/busybox gunzip | /bin/busybox tar -x -C /scratch/strategy",
             payload,
             "ECOLOGY_STRATEGY_ARCHIVE",
             f"exec /usr/bin/python3 -I /scratch/strategy/runner.py {args}",
