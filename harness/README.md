@@ -27,8 +27,8 @@ visible policy violations.
 Run a fixture match locally:
 
 ```bash
-python -m harness.harness harness/fixtures/leaky_defender.py harness/fixtures/cautious_attacker.py
-pytest -q harness/tests
+python3 -m harness.harness harness/fixtures/leaky_defender.py harness/fixtures/cautious_attacker.py
+python3 -m pytest -q harness/tests
 ```
 
 ## Event log
