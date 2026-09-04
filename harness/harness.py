@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import contextlib
+import argparse
 import importlib.util
 import io
+import json
 import signal
 import time
 import uuid
@@ -132,12 +134,13 @@ def run_match(
             events.append({"type": "defender_output", "text": printed})
         return response
 
+    attacker_stdout = io.StringIO()
     try:
-        attacker_stdout = io.StringIO()
         with _wall_clock_limit(timeout_seconds), contextlib.redirect_stdout(attacker_stdout):
             attack(lambda note_id, token, technique=None: call(note_id, token, technique, source="attacker"))
         if attacker_stdout.getvalue():
             events.append({"type": "attacker_output", "text": attacker_stdout.getvalue()})
+            attacker_stdout = io.StringIO()
 
         # Fixed hidden benign regression checks.
         for note_id, (token, expected) in PUBLIC_NOTES.items():
@@ -160,6 +163,21 @@ def run_match(
         status["attacker_error"] = safe_text(error)
         status["finished"] = "attacker_error"
     finally:
+        if attacker_stdout.getvalue():
+            events.append({"type": "attacker_output", "text": attacker_stdout.getvalue()})
         status["requests_used"] = request_count
         status["elapsed_ms"] = int((time.monotonic() - started) * 1000)
     return log
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description="Run a protected note vault match")
+    parser.add_argument("defender", help="path to a defender Python module")
+    parser.add_argument("attacker", help="path to an attacker Python module")
+    parser.add_argument("--secret", default=DEFAULT_SECRET_FLAG, help="secret used at note:admin")
+    args = parser.parse_args()
+    print(json.dumps(run_match(args.defender, args.attacker, secret_flag=args.secret), sort_keys=True, indent=2))
+
+
+if __name__ == "__main__":
+    main()

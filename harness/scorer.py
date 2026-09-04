@@ -57,7 +57,7 @@ def score_event_log(event_log: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "scorer_version": SCORER_VERSION,
         "challenge_id": event_log.get("challenge", {}).get("id"),
-        "total": confidentiality + availability + attack_quality,
+        "total": (60 if leaked else confidentiality) + availability + attack_quality,
         "confidentiality": {"defender": confidentiality, "attacker": 60 if leaked else 0},
         "availability": {"defender": availability, "passed": benign_passed, "total": benign_total},
         "attack_quality": {"attacker": attack_quality, "techniques": sorted(techniques)},
