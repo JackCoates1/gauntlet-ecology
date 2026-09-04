@@ -17,8 +17,8 @@ dependencies = [
 dev = ["httpx>=0.27,<1.0", "pytest>=8.0,<9.0"]
 
 [tool.setuptools.packages.find]
-include = ["api*", "scheduler*"]
+include = ["api*", "scheduler*", "strategygen*"]
 
 [tool.pytest.ini_options]
-testpaths = ["api/tests", "schema/tests", "harness/tests", "scheduler/tests"]
+testpaths = ["api/tests", "schema/tests", "harness/tests", "scheduler/tests", "strategygen/tests"]
 addopts = "-ra"

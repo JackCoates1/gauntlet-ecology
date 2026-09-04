@@ -1,0 +1,1 @@
+from scheduler.tests.conftest import scheduler_database_url

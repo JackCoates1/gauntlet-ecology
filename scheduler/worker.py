@@ -8,6 +8,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -299,7 +300,8 @@ def execute_match(connection: psycopg.Connection, match_id: UUID, *, sandbox_run
     with connection.cursor() as cursor:
         cursor.execute(
             """
-            SELECT m.*, a.source_bundle_uri AS attacker_uri, d.source_bundle_uri AS defender_uri
+            SELECT m.*, a.source_bundle_uri AS attacker_uri, d.source_bundle_uri AS defender_uri,
+                   a.validation_status AS attacker_validation_status, d.validation_status AS defender_validation_status
             FROM matches AS m
             JOIN strategies AS a ON a.id = m.attacker_strategy_id
             JOIN strategies AS d ON d.id = m.defender_strategy_id
@@ -322,12 +324,28 @@ def execute_match(connection: psycopg.Connection, match_id: UUID, *, sandbox_run
         )
     connection.commit()
 
+    secret = f"FLAG{{generation-{match['generation_id']}-match-{match_id}}}"
     attacker = next((item for item in FIXTURES if item.source_uri == match["attacker_uri"]), None)
     defender = next((item for item in FIXTURES if item.source_uri == match["defender_uri"]), None)
-    if attacker is None or defender is None:
-        raise ValueError("only checked-in fixture strategies are executable in generation one")
-    secret = f"FLAG{{generation-{match['generation_id']}-match-{match_id}}}"
-    sandbox_result = sandbox_runner(sandbox_program(attacker, defender, secret=secret))
+    if attacker is not None and defender is not None:
+        program = sandbox_program(attacker, defender, secret=secret)
+    else:
+        if match["attacker_validation_status"] != "valid" or match["defender_validation_status"] != "valid":
+            raise ValueError("only validation-approved generated strategies may be executed")
+        from strategygen.sandbox_program import sandbox_program as generated_sandbox_program
+
+        def read_generated(uri: str, role: str) -> str:
+            if not uri.startswith("file://"):
+                raise ValueError(f"unsupported {role} strategy source URI: {uri}")
+            return Path(uri.removeprefix("file://")).read_text()
+
+        program = generated_sandbox_program(
+            attacker_source=read_generated(match["attacker_uri"], "attacker"),
+            defender_source=read_generated(match["defender_uri"], "defender"),
+            mode="match",
+            secret=secret,
+        )
+    sandbox_result = sandbox_runner(program)
     evidence_root_hash = _insert_events(connection, match_id, sandbox_result.event_log)
     _record_score(connection, match_id, sandbox_result.event_log, evidence_root_hash)
     with connection.cursor() as cursor:

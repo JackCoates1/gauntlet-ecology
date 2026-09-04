@@ -10,3 +10,4 @@ build/
 
 # Local Postgres data used only by docker-compose.dev.yml
 .postgres-data/
+strategygen/generated/
