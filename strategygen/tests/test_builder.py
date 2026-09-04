@@ -3,6 +3,7 @@ from pathlib import Path
 import pytest
 
 from strategygen.builder import generate_builder_attempt, insert_challenge_version, validate_builder_output
+from strategygen.generator import generate_attempt
 
 
 class _NoDatabaseAccess:
@@ -25,3 +26,8 @@ def test_malformed_or_out_of_range_builder_output_is_rejected_before_database_ac
     assert "token_length" in (attempt.validation.reason or "")
     with pytest.raises(ValueError, match="refusing to persist invalid builder output"):
         insert_challenge_version(_NoDatabaseAccess(), attempt)  # type: ignore[arg-type]
+
+
+def test_builder_cannot_accidentally_use_the_python_ast_generator():
+    with pytest.raises(ValueError, match="dedicated generator"):
+        generate_attempt("builder", 1)
