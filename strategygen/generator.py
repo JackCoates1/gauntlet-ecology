@@ -65,6 +65,11 @@ def extract_python(raw_output: str, contract: RoleContract) -> str:
     if fenced:
         preferred = [block for block in fenced if f"def {contract.callable_name}(" in block]
         text = (preferred or fenced)[0].strip()
+    else:
+        # No closed fence found (e.g. the model's output was truncated before
+        # its closing ```) - still strip a leading opening fence if present,
+        # rather than leaving it in text that will fail ast.parse.
+        text = re.sub(r"^```(?:python|py)?\s*\n", "", text)
     return text + "\n" if text else ""
 
 
