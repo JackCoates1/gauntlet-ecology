@@ -211,7 +211,6 @@ function route() {
   if (generation) renderGeneration(generation[1]);
   else if (match) renderMatch(match[1]);
   else renderHome();
-  app.focus();
 }
 
 window.addEventListener("hashchange", route);
