@@ -41,12 +41,14 @@ class GenerationAttempt:
     wall_time_ms: int
     validation: ValidationResult
     command_error: str | None = None
+    provider: str = "codex exec"
+    model: str = CODEX_MODEL
 
     @property
     def provenance(self) -> dict[str, object]:
         return {
-            "provider": "codex exec",
-            "model": CODEX_MODEL,
+            "provider": self.provider,
+            "model": self.model,
             "reasoning_effort": REASONING_EFFORT,
             "timestamp": self.started_at,
             "wall_time_ms": self.wall_time_ms,
@@ -133,6 +135,8 @@ def generate_attempt(
     *,
     artifact_dir: Path = DEFAULT_ARTIFACT_DIR,
     invoker: Callable[[str], tuple[str, int, str | None]] = invoke_codex,
+    provider: str = "codex exec",
+    model: str = CODEX_MODEL,
 ) -> GenerationAttempt:
     """Generate and statically validate one strategy attempt, never importing it on the host."""
     contract = role_contract(role)
@@ -146,4 +150,4 @@ def generate_attempt(
     validation = validate_source(source, role)
     if command_error and validation.valid:
         validation = ValidationResult(False, command_error)
-    return GenerationAttempt(role, attempt, source, raw_output, artifact_path, started_at, wall_time_ms, validation, command_error)
+    return GenerationAttempt(role, attempt, source, raw_output, artifact_path, started_at, wall_time_ms, validation, command_error, provider, model)
