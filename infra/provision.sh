@@ -24,7 +24,7 @@ apt-get update -qq
 (cd "$STAGE" && apt-get download runsc busybox-static)
 mkdir -p "$STAGE/rootfs/bin" "$STAGE/rootfs/dev" "$STAGE/rootfs/proc" "$STAGE/rootfs/scratch"
 dpkg-deb -x "$STAGE"/busybox-static_*_amd64.deb "$STAGE/busy"
-cp "$STAGE/busy/bin/busybox" "$STAGE/rootfs/bin/busybox"
+cp "$STAGE/busy/usr/bin/busybox" "$STAGE/rootfs/bin/busybox"
 for a in sh ash cat echo id sleep touch dd head yes true false ls mkdir rm ping; do ln -s busybox "$STAGE/rootfs/bin/$a"; done
 cp infra/assets/runner-daemon.sh "$STAGE/runner-daemon.sh"; cp infra/assets/ecology-runner.service "$STAGE/ecology-runner.service"
 chmod 0755 "$STAGE/runner-daemon.sh"
@@ -43,7 +43,7 @@ runcmd:
 EOF
 printf 'instance-id: ecology-runner\nlocal-hostname: ecology-runner\n' >"$STAGE/meta-data"
 genisoimage -quiet -output "$ISO_DIR/ecology-runner-seed.iso" -volid cidata -joliet -rock "$STAGE"
-qm create "$VMID" --name "$NAME" --memory 3072 --cores 1 --cpu cputype=kvm64 --ostype l26 --agent 0 --onboot 0 --net0 "virtio,bridge=$BRIDGE,firewall=1" --serial0 socket --vga serial0 --scsihw virtio-scsi-pci --boot order=scsi0 --protection 1 --tags ecology
+qm create "$VMID" --name "$NAME" --memory 3072 --cores 1 --cpu cputype=qemu64 --kvm 0 --ostype l26 --agent 0 --onboot 0 --net0 "virtio,bridge=$BRIDGE,firewall=1" --serial0 socket --vga serial0 --scsihw virtio-scsi-pci --boot order=scsi0 --protection 1 --tags ecology
 qm set "$VMID" --scsi0 local-lvm:0,import-from="$IMG",discard=on,ssd=1
 qm resize "$VMID" scsi0 12G
 qm set "$VMID" --ide2 "local:iso/ecology-runner-seed.iso,media=cdrom" --ciupgrade 0
