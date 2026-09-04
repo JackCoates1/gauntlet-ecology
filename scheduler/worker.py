@@ -360,6 +360,20 @@ def run_generation(connection: psycopg.Connection, *, challenge_semver: str = "1
     return GenerationSummary(generation["id"], generation["number"], match_count, score_count, match_count == score_count and match_count == 2)
 
 
+def generation_summary(connection: psycopg.Connection, *, number: int) -> GenerationSummary | None:
+    """Read the durable result for an already-idempotent generation invocation."""
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT id, number FROM generations WHERE number = %s", (number,))
+        generation = cursor.fetchone()
+        if generation is None:
+            return None
+        cursor.execute("SELECT count(*) AS count FROM matches WHERE generation_id = %s", (generation["id"],))
+        match_count = cursor.fetchone()["count"]
+        cursor.execute("SELECT count(*) AS count FROM scores AS s JOIN matches AS m ON m.id = s.match_id WHERE m.generation_id = %s", (generation["id"],))
+        score_count = cursor.fetchone()["count"]
+    return GenerationSummary(generation["id"], generation["number"], match_count, score_count, match_count == score_count and match_count == 2)
+
+
 def process_one(connection: psycopg.Connection, *, worker_id: str) -> GenerationSummary | None:
     job = claim_job(connection, worker_id=worker_id)
     if job is None:
