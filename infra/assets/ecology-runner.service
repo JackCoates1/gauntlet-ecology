@@ -1,0 +1,17 @@
+[Unit]
+Description=Gauntlet Ecology serial gVisor runner
+After=cloud-final.service
+Wants=cloud-final.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/sbin/ecology-runner-daemon
+Restart=no
+StandardInput=tty
+StandardOutput=tty
+StandardError=tty
+TTYPath=/dev/ttyS0
+TTYReset=yes
+
+[Install]
+WantedBy=multi-user.target
