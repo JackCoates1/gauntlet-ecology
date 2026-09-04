@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 from dataclasses import dataclass
 
 from harness import challenge
@@ -12,9 +13,10 @@ from harness import harness as match_harness
 @dataclass(frozen=True)
 class RoleContract:
     role: str
-    callable_name: str
+    callable_name: str | None
     parameters: tuple[str, ...]
     role_goal: str
+    output_kind: str = "python"
 
 
 CONTRACTS = {
@@ -30,6 +32,13 @@ CONTRACTS = {
         parameters=("note_id", "token"),
         role_goal="Protect the admin note while keeping documented public notes available.",
     ),
+    "builder": RoleContract(
+        role="builder",
+        callable_name=None,
+        parameters=(),
+        role_goal="Propose one bounded challenge scenario for the next immutable version.",
+        output_kind="json",
+    ),
 }
 
 
@@ -43,6 +52,8 @@ def role_contract(role: str) -> RoleContract:
 def build_prompt(role: str) -> str:
     """Build a generation prompt from the currently imported harness contract."""
     contract = role_contract(role)
+    if contract.output_kind == "json":
+        return _build_builder_prompt(contract)
     challenge_doc = inspect.getdoc(challenge) or ""
     runner_doc = inspect.getdoc(match_harness.run_match) or ""
     public_notes = "\n".join(
@@ -82,3 +93,35 @@ return a string without raising. The harness injects `SECRET_FLAG` into the impo
 module before a real match; do not require it at import time.
 
 Return source code only."""
+
+
+def _build_builder_prompt(contract: RoleContract) -> str:
+    """Build the JSON-only builder prompt from the live scenario validator."""
+    ranges = {
+        name: {"minimum": minimum, "maximum": maximum}
+        for name, (minimum, maximum) in challenge.SCENARIO_CONFIG_RANGES.items()
+    }
+    return f"""You are the Gauntlet: Ecology challenge builder for the protected-note-vault harness.
+
+Return ONLY one JSON object: the complete `scenario_config` for a new immutable challenge
+version. Do not return Python, Markdown fences, comments, explanations, or extra keys.
+
+The harness has exactly these real, validated scenario controls. Every key is required and values
+must be JSON integers within the stated inclusive ranges:
+{json.dumps(ranges, indent=2, sort_keys=True)}
+
+Default baseline config:
+{json.dumps(challenge.DEFAULT_SCENARIO_CONFIG, indent=2, sort_keys=True)}
+
+Semantics:
+- `request_budget` caps calls made by the attacker; it may only reduce the current cap of
+  {challenge.MAX_ATTACK_REQUESTS}.
+- `decoy_note_count` appends that many public notes, named `note:decoy-1`, `note:decoy-2`, and so
+  on, to the two unchanged baseline public notes.
+- `token_length` controls each deterministic decoy token's length. It does not rewrite existing
+  public tokens or the hidden secret format.
+- Every configured public note receives a hidden availability check during a match.
+
+Your role is {contract.role!r}. Goal: {contract.role_goal}
+Choose a configuration that is meaningfully different from the baseline while remaining inside
+the contract. Return the JSON object only."""

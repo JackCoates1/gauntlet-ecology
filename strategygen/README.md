@@ -37,3 +37,33 @@ code-only instruction.
 The opt-in integration test is `strategygen/tests/test_live_integration.py`.
 Set `GAUNTLET_LIVE_CODEX=1` to run it; ordinary `pytest` never spends Codex
 quota.
+
+## Builder scenarios
+
+The builder uses the same pluggable invoker pattern, but its artifact is JSON
+rather than Python. `strategygen.contracts.build_prompt("builder")` asks for
+only this complete `scenario_config` object:
+
+```json
+{
+  "request_budget": 20,
+  "decoy_note_count": 2,
+  "token_length": 16
+}
+```
+
+The prompt imports the live ranges from `harness.challenge`: `request_budget`
+is an integer from 1–20, `decoy_note_count` is an integer from 0–10, and
+`token_length` is an integer from 8–64. All three keys are required and no
+additional keys are accepted. The baseline two public notes are never changed;
+decoys are deterministically named public notes, and `token_length` affects
+only their tokens. This is deliberately the whole current harness surface.
+
+`strategygen.builder.validate_builder_output()` parses JSON and delegates the
+range/shape check to the harness before any database work. A valid
+`BuilderAttempt` can then be passed to `insert_challenge_version()`: it locks
+version allocation, bumps the patch from the most recently created
+`challenge_versions` row, copies its source/seed/scoring references, and
+inserts a new row with the validated scenario. Historical rows are never
+updated. `test_live_codex_builder_creates_a_new_challenge_version` is opt-in
+under the existing `GAUNTLET_LIVE_CODEX=1` flag and spends real Codex quota.
