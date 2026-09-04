@@ -137,11 +137,12 @@ def generate_attempt(
     invoker: Callable[[str], tuple[str, int, str | None]] = invoke_codex,
     provider: str = "codex exec",
     model: str = CODEX_MODEL,
+    prior_generation_context: str | None = None,
 ) -> GenerationAttempt:
     """Generate and statically validate one strategy attempt, never importing it on the host."""
     contract = role_contract(role)
     started_at = datetime.now(UTC).isoformat()
-    raw_output, wall_time_ms, command_error = invoker(build_prompt(role))
+    raw_output, wall_time_ms, command_error = invoker(build_prompt(role, prior_generation_context))
     source = extract_python(raw_output, contract)
     artifact_dir.mkdir(parents=True, exist_ok=True)
     artifact_path = artifact_dir / f"{role}-{started_at.replace(':', '').replace('+', '_')}-attempt-{attempt}.py"

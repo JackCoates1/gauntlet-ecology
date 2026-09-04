@@ -41,13 +41,18 @@ def connect(database_url: str | None = None) -> psycopg.Connection:
 
 
 def enqueue_job(connection: psycopg.Connection, *, job_type: str, idempotency_key: str, payload_ref: str) -> dict[str, Any]:
-    """Insert a job exactly once and return its authoritative row."""
+    """Insert a job exactly once, reviving only a previously failed retry."""
     with connection.cursor() as cursor:
         cursor.execute(
             """
             INSERT INTO jobs (type, idempotency_key, payload_ref)
             VALUES (%s, %s, %s)
-            ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
+            ON CONFLICT (idempotency_key) DO UPDATE SET
+              status = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN 'queued' ELSE jobs.status END,
+              lease_owner = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.lease_owner END,
+              lease_until = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.lease_until END,
+              error_class = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN NULL ELSE jobs.error_class END,
+              updated_at = CASE WHEN jobs.status IN ('failed', 'cancelled') THEN now() ELSE jobs.updated_at END
             RETURNING *
             """,
             (job_type, idempotency_key, payload_ref),
@@ -247,7 +252,9 @@ def _redact(value: Any, secret: str) -> Any:
 
 def _insert_events(connection: psycopg.Connection, match_id: UUID, event_log: dict[str, Any]) -> str:
     secret = str(event_log["challenge"]["secret_flag"])
-    previous: str | None = None
+    # Hashes are globally unique in the schema.  Seed each per-match chain so
+    # two reproducible matches with identical redacted events do not collide.
+    previous: str | None = "sha256:" + hashlib.sha256(f"match:{match_id}".encode()).hexdigest()
     with connection.cursor() as cursor:
         for sequence, event in enumerate(event_log["events"]):
             payload = _redact(event, secret)
@@ -392,16 +399,25 @@ def generation_summary(connection: psycopg.Connection, *, number: int) -> Genera
     return GenerationSummary(generation["id"], generation["number"], match_count, score_count, match_count == score_count and match_count == 2)
 
 
-def process_one(connection: psycopg.Connection, *, worker_id: str) -> GenerationSummary | None:
+def process_one(
+    connection: psycopg.Connection,
+    *,
+    worker_id: str,
+    handlers: dict[str, Callable[[psycopg.Connection, dict[str, Any]], Any]] | None = None,
+) -> Any | None:
+    """Claim and execute one durable job, with optional additive job handlers."""
     job = claim_job(connection, worker_id=worker_id)
     if job is None:
         return None
     _mark_running(connection, job["id"], worker_id)
     try:
-        if job["type"] != "run_generation":
-            raise ValueError(f"unsupported job type {job['type']!r}")
         payload = json.loads(job["payload_ref"])
-        summary = run_generation(connection, challenge_semver=payload["challenge_semver"], number=int(payload["number"]))
+        if job["type"] == "run_generation":
+            summary = run_generation(connection, challenge_semver=payload["challenge_semver"], number=int(payload["number"]))
+        elif handlers is not None and job["type"] in handlers:
+            summary = handlers[job["type"]](connection, payload)
+        else:
+            raise ValueError(f"unsupported job type {job['type']!r}")
     except Exception as error:
         _finish_job(connection, job["id"], worker_id, error=error)
         raise

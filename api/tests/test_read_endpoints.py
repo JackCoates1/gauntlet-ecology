@@ -16,6 +16,23 @@ def test_get_generation(client, seeded_ids):
     }
 
 
+def test_generation_lineage_returns_selection_and_score_trend(client, seeded_ids):
+    response = client.get(f"/generations/{seeded_ids['generation_id']}/lineage")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["generation_number"] == 1
+    assert body["selection_decision"] is None
+    assert body["trend"] == [{
+        "generation_id": seeded_ids["generation_id"],
+        "number": 1,
+        "scored_matches": 1,
+        "average_attacker_points": 7.5,
+        "average_defender_points": 5.0,
+        "attacker_wins": 1,
+        "defender_wins": 0,
+    }]
+
+
 def test_get_match(client, seeded_ids):
     response = client.get(f"/matches/{seeded_ids['match_id']}")
     assert response.status_code == 200

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
+from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 from uuid import UUID
 
@@ -13,7 +15,7 @@ import psycopg
 from scheduler.sandbox import run as run_sandbox
 from scheduler.worker import SANDBOX_POLICY_VERSION, execute_match
 
-from .generator import GenerationAttempt, MAX_ATTEMPTS_PER_ROLE, generate_attempt
+from .generator import CODEX_MODEL, GenerationAttempt, MAX_ATTEMPTS_PER_ROLE, generate_attempt, invoke_codex
 from .sandbox_program import sandbox_program
 
 
@@ -31,7 +33,14 @@ class RealGenerationSummary:
         return self.match_id is not None and self.score is not None
 
 
-def create_real_generation(connection: psycopg.Connection, *, challenge_semver: str, number: int) -> dict[str, Any]:
+def create_real_generation(
+    connection: psycopg.Connection,
+    *,
+    challenge_semver: str,
+    number: int,
+    population_settings: dict[str, Any] | None = None,
+    parent_selection_policy: str = "codex-real-strategygen-v1",
+) -> dict[str, Any]:
     """Open a generation reserved for real Codex source, not bootstrap fixtures."""
     with connection.cursor() as cursor:
         cursor.execute("SELECT * FROM challenge_versions WHERE semver = %s", (challenge_semver,))
@@ -48,10 +57,10 @@ def create_real_generation(connection: psycopg.Connection, *, challenge_semver: 
             """
             INSERT INTO generations
                 (number, challenge_version_id, state, random_seed, population_settings, parent_selection_policy, opened_at)
-            VALUES (%s, %s, 'open', %s, %s, 'codex-real-strategygen-v1', now())
+            VALUES (%s, %s, 'open', %s, %s, %s, now())
             RETURNING *
             """,
-            (number, challenge["id"], number, json.dumps({"source": "codex exec", "roles": ["attacker", "defender"]})),
+            (number, challenge["id"], number, json.dumps(population_settings or {"source": "codex exec", "roles": ["attacker", "defender"]}), parent_selection_policy),
         )
         generation = cursor.fetchone()
     connection.commit()
@@ -72,7 +81,14 @@ def _agent(connection: psycopg.Connection, generation_id: UUID, role: str) -> di
     return agent
 
 
-def record_attempt(connection: psycopg.Connection, *, generation: dict[str, Any], agent: dict[str, Any], attempt: GenerationAttempt) -> dict[str, Any]:
+def record_attempt(
+    connection: psycopg.Connection,
+    *,
+    generation: dict[str, Any],
+    agent: dict[str, Any],
+    attempt: GenerationAttempt,
+    parent_strategy_ids: tuple[UUID, ...] = (),
+) -> dict[str, Any]:
     """Store every output, including invalid ones, before any sandbox execution."""
     source_hash = "sha256:" + hashlib.sha256(attempt.source.encode()).hexdigest()
     provenance = {**attempt.provenance, "attempt": attempt.attempt, "validation_reason": attempt.validation.reason}
@@ -80,17 +96,18 @@ def record_attempt(connection: psycopg.Connection, *, generation: dict[str, Any]
         cursor.execute(
             """
             INSERT INTO strategies
-                (agent_id, generation_id, manifest_version, source_bundle_hash, source_bundle_uri,
+                (agent_id, generation_id, parent_strategy_ids, manifest_version, source_bundle_hash, source_bundle_uri,
                  rationale, model_provenance, validation_status, policy_verdict)
-            VALUES (%s, %s, 'codex-python-v1', %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, 'codex-python-v1', %s, %s, %s, %s, %s, %s)
             ON CONFLICT (agent_id, generation_id, source_bundle_hash) DO UPDATE
               SET model_provenance = EXCLUDED.model_provenance,
                   validation_status = EXCLUDED.validation_status,
                   policy_verdict = EXCLUDED.policy_verdict,
-                  rationale = EXCLUDED.rationale
+                  rationale = EXCLUDED.rationale,
+                  parent_strategy_ids = EXCLUDED.parent_strategy_ids
             RETURNING *
             """,
-            (agent["id"], generation["id"], source_hash, attempt.artifact_path.resolve().as_uri(), "Codex-generated strategy; static validation precedes a sandbox-only import smoke test.", json.dumps(provenance), "valid" if attempt.validation.valid else "invalid", "allowed" if attempt.validation.valid else "pending"),
+            (agent["id"], generation["id"], list(parent_strategy_ids), source_hash, attempt.artifact_path.resolve().as_uri(), "Codex-generated strategy; static validation precedes a sandbox-only import smoke test.", json.dumps(provenance), "valid" if attempt.validation.valid else "invalid", "allowed" if attempt.validation.valid else "pending"),
         )
         strategy = cursor.fetchone()
         cursor.execute("UPDATE generations SET model_budget_counters = model_budget_counters || %s::jsonb WHERE id = %s", (json.dumps({f"{attempt.role}_attempt_{attempt.attempt}_wall_time_ms": attempt.wall_time_ms}), generation["id"]))
@@ -122,14 +139,66 @@ def _smoke_attempt(attempt: GenerationAttempt) -> str | None:
     return None
 
 
-def _generate_role(connection: psycopg.Connection, generation: dict[str, Any], role: str, *, attempts: int) -> dict[str, Any] | None:
+def _existing_valid_role(connection: psycopg.Connection, generation_id: UUID, role: str) -> dict[str, Any] | None:
+    """Return a durable successful candidate, including its saved source."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT s.* FROM strategies AS s
+            JOIN agents AS a ON a.id = s.agent_id
+            WHERE s.generation_id = %s AND a.role = %s
+              AND s.validation_status = 'valid' AND s.policy_verdict = 'allowed'
+            ORDER BY s.created_at, s.id LIMIT 1
+            """,
+            (generation_id, role),
+        )
+        strategy = cursor.fetchone()
+    if strategy is None:
+        return None
+    uri = str(strategy["source_bundle_uri"])
+    if not uri.startswith("file://"):
+        return None
+    source_path = Path(uri.removeprefix("file://"))
+    if not source_path.exists():
+        return None
+    return {**strategy, "source": source_path.read_text()}
+
+
+def _attempts_already_recorded(connection: psycopg.Connection, generation_id: UUID, role: str) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """SELECT count(*) AS count FROM strategies AS s
+               JOIN agents AS a ON a.id = s.agent_id
+               WHERE s.generation_id = %s AND a.role = %s""",
+            (generation_id, role),
+        )
+        return int(cursor.fetchone()["count"])
+
+
+def _generate_role(
+    connection: psycopg.Connection,
+    generation: dict[str, Any],
+    role: str,
+    *,
+    attempts: int,
+    prior_generation_context: str | None = None,
+    parent_strategy_ids: tuple[UUID, ...] = (),
+    invoker: Callable[[str], tuple[str, int, str | None]] = invoke_codex,
+    provider: str = "codex exec",
+    model: str = CODEX_MODEL,
+    smoke_validator: Callable[[GenerationAttempt], str | None] = _smoke_attempt,
+) -> dict[str, Any] | None:
+    existing = _existing_valid_role(connection, generation["id"], role)
+    if existing is not None:
+        return existing
     agent = _agent(connection, generation["id"], role)
-    for number in range(1, attempts + 1):
-        attempt = generate_attempt(role, number)
-        strategy = record_attempt(connection, generation=generation, agent=agent, attempt=attempt)
+    already_recorded = _attempts_already_recorded(connection, generation["id"], role)
+    for number in range(already_recorded + 1, attempts + 1):
+        attempt = generate_attempt(role, number, invoker=invoker, provider=provider, model=model, prior_generation_context=prior_generation_context)
+        strategy = record_attempt(connection, generation=generation, agent=agent, attempt=attempt, parent_strategy_ids=parent_strategy_ids)
         if not attempt.validation.valid:
             continue
-        smoke_error = _smoke_attempt(attempt)
+        smoke_error = smoke_validator(attempt)
         update_smoke_validation(connection, strategy["id"], error=smoke_error)
         if smoke_error is None:
             return {**strategy, "source": attempt.source}
@@ -141,7 +210,10 @@ def schedule_generated_match(connection: psycopg.Connection, *, generation: dict
         cursor.execute(
             """INSERT INTO matches
                (attacker_strategy_id, defender_strategy_id, generation_id, challenge_version_id, seed, status, sandbox_policy_version)
-               VALUES (%s, %s, %s, %s, %s, 'scheduled', %s) RETURNING id""",
+               VALUES (%s, %s, %s, %s, %s, 'scheduled', %s)
+               ON CONFLICT (attacker_strategy_id, defender_strategy_id, seed, challenge_version_id)
+               DO UPDATE SET attacker_strategy_id = EXCLUDED.attacker_strategy_id
+               RETURNING id""",
             (attacker_strategy["id"], defender_strategy["id"], generation["id"], generation["challenge_version_id"], generation["random_seed"], SANDBOX_POLICY_VERSION),
         )
         match = cursor.fetchone()

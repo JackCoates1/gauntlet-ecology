@@ -33,7 +33,26 @@ uvicorn api.main:app --reload
 ```
 
 The API uses `DATABASE_URL` and exposes `GET /generations`, `GET /generations/{id}`,
-`GET /matches/{id}`, and `GET /leaderboard`. There are deliberately no write endpoints yet.
+`GET /generations/{id}/lineage`, `GET /matches/{id}`, and `GET /leaderboard`. There
+are deliberately no write endpoints yet.
+
+## Continuous evolution
+
+Run a bounded live evolutionary pass (the caps are required deliberately):
+
+```bash
+python -m evolution.run_loop --generations 3 --max-model-calls 12 --max-wall-seconds 900
+```
+
+Each new generation selects the highest aggregate attacker score and highest
+aggregate defender-plus-availability score from scored matches in the previous
+three closed generations. The resulting `selection_decisions` row records both
+the eligible matches and selected strategy parents before a model is called.
+The role-specific parent source is passed to the next prompt as untrusted
+reference material. Generation jobs are keyed as
+`evolution-generation:<challenge-semver>:<number>`; rerunning after a failure
+resumes the same generation and reuses its persisted selection, valid strategy,
+match and score rows.
 
 Run the integration tests against a fresh local schema (the database must be running):
 
