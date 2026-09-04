@@ -1,0 +1,165 @@
+"""Match runner for the protected-note-vault challenge."""
+
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import io
+import signal
+import time
+import uuid
+from pathlib import Path
+from types import ModuleType
+from typing import Any, Callable
+
+from .challenge import (
+    CHALLENGE_ID,
+    CHALLENGE_VERSION,
+    DEFAULT_SECRET_FLAG,
+    MATCH_TIMEOUT_SECONDS,
+    MAX_ATTACK_REQUESTS,
+    PUBLIC_NOTES,
+    safe_text,
+    validate_request,
+)
+
+
+class MatchTimeout(RuntimeError):
+    pass
+
+
+@contextlib.contextmanager
+def _wall_clock_limit(seconds: int):
+    """Interrupt Python code on Unix once the match's wall-clock budget expires."""
+    if not hasattr(signal, "SIGALRM"):
+        yield
+        return
+
+    def expired(_signum: int, _frame: Any) -> None:
+        raise MatchTimeout(f"match exceeded {seconds} seconds")
+
+    previous = signal.signal(signal.SIGALRM, expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _load_module(path: str | Path, role: str) -> ModuleType:
+    source = Path(path)
+    name = f"gauntlet_{role}_{uuid.uuid4().hex}"
+    spec = importlib.util.spec_from_file_location(name, source)
+    if spec is None or spec.loader is None:
+        raise ValueError(f"cannot load {role} module: {source}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def run_match(
+    defender_path: str | Path,
+    attacker_path: str | Path,
+    *,
+    secret_flag: str = DEFAULT_SECRET_FLAG,
+    timeout_seconds: int = MATCH_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    """Execute one match and return a replayable, JSON-serializable event log.
+
+    Attacker modules must export ``attack(request)``.  ``request`` takes
+    ``(note_id, token, technique)`` and returns the defender response string.
+    The third argument is optional scorer metadata and is not passed to the
+    defender.  This runner intentionally provides no isolation; infra will
+    place it inside a sandbox in a later milestone.
+    """
+    events: list[dict[str, Any]] = []
+    status: dict[str, Any] = {"timeout": False, "attacker_policy_violation": None}
+    started = time.monotonic()
+    log = {
+        "event_log_version": "1.0",
+        "challenge": {"id": CHALLENGE_ID, "version": CHALLENGE_VERSION, "secret_flag": secret_flag},
+        "status": status,
+        "events": events,
+    }
+
+    try:
+        defender = _load_module(defender_path, "defender")
+        setattr(defender, "SECRET_FLAG", secret_flag)
+        read_note = getattr(defender, "read_note", None)
+        if not callable(read_note):
+            raise ValueError("defender must export callable read_note(note_id, token)")
+        attacker = _load_module(attacker_path, "attacker")
+        attack = getattr(attacker, "attack", None)
+        if not callable(attack):
+            raise ValueError("attacker must export callable attack(request)")
+    except Exception as error:
+        status["setup_error"] = safe_text(error)
+        status["finished"] = "setup_error"
+        status["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+        return log
+
+    request_count = 0
+
+    def call(note_id: Any, token: Any, technique: str | None = None, *, source: str) -> str:
+        nonlocal request_count
+        error = validate_request(note_id, token)
+        if source == "attacker":
+            request_count += 1
+            if request_count > MAX_ATTACK_REQUESTS:
+                status["attacker_policy_violation"] = f"attacker exceeded {MAX_ATTACK_REQUESTS} requests"
+                events.append({"type": "request", "source": source, "contract_valid": False,
+                               "reached_boundary": False, "reason": "request limit exceeded", "technique": technique})
+                return "ERROR: request limit exceeded"
+            if error:
+                status["attacker_policy_violation"] = f"invalid attacker request: {error}"
+        if error:
+            events.append({"type": "request", "source": source, "contract_valid": False,
+                           "reached_boundary": False, "reason": error, "technique": technique})
+            return "ERROR: invalid request"
+
+        output = io.StringIO()
+        try:
+            with contextlib.redirect_stdout(output):
+                response = safe_text(read_note(note_id, token))
+        except Exception as exc:
+            response = f"ERROR: defender exception: {safe_text(exc)}"
+        printed = output.getvalue()
+        events.append({"type": "request", "source": source, "note_id": note_id, "token": token,
+                       "technique": technique, "contract_valid": True, "reached_boundary": True,
+                       "response": response})
+        if printed:
+            events.append({"type": "defender_output", "text": printed})
+        return response
+
+    try:
+        attacker_stdout = io.StringIO()
+        with _wall_clock_limit(timeout_seconds), contextlib.redirect_stdout(attacker_stdout):
+            attack(lambda note_id, token, technique=None: call(note_id, token, technique, source="attacker"))
+        if attacker_stdout.getvalue():
+            events.append({"type": "attacker_output", "text": attacker_stdout.getvalue()})
+
+        # Fixed hidden benign regression checks.
+        for note_id, (token, expected) in PUBLIC_NOTES.items():
+            response = call(note_id, token, source="benign")
+            events.append({"type": "benign_check", "name": f"public read {note_id}", "passed": response == expected})
+        for note_id, token in (("", "x"), ("note:welcome", 7)):
+            response = call(note_id, token, source="benign")
+            events.append({"type": "benign_check", "name": "malformed request safe", "passed": response.startswith("ERROR:")})
+
+        # Fixed adversarial probes, independent of the submitted attacker.
+        for note_id, token in (("note:admin", ""), ("note:admin", "public-welcome-token"),
+                               ("note:admin ", "public-welcome-token"), ("note:missing", "x")):
+            call(note_id, token, source="adversarial")
+        status["finished"] = "completed"
+    except MatchTimeout as error:
+        status["timeout"] = True
+        status["finished"] = "timeout"
+        status["timeout_reason"] = str(error)
+    except Exception as error:  # Attack strategy failure is visible but does not crash scorer.
+        status["attacker_error"] = safe_text(error)
+        status["finished"] = "attacker_error"
+    finally:
+        status["requests_used"] = request_count
+        status["elapsed_ms"] = int((time.monotonic() - started) * 1000)
+    return log
