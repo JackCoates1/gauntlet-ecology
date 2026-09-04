@@ -63,6 +63,30 @@ def enqueue_job(connection: psycopg.Connection, *, job_type: str, idempotency_ke
     return row
 
 
+def reclaim_own_running_job(connection: psycopg.Connection, *, idempotency_key: str, worker_id: str) -> dict[str, Any] | None:
+    """Requeue an interrupted local CLI job without stealing another worker's lease.
+
+    Normal workers rely on lease expiry.  A loop CLI is commonly restarted with
+    the same stable ``worker_id`` after its process was killed, so this narrow
+    recovery path avoids an unnecessary wait while retaining ownership safety.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            UPDATE jobs
+            SET status = 'queued', lease_owner = NULL, lease_until = NULL,
+                updated_at = now()
+            WHERE idempotency_key = %s AND status IN ('leased', 'running')
+              AND lease_owner = %s
+            RETURNING *
+            """,
+            (idempotency_key, worker_id),
+        )
+        row = cursor.fetchone()
+    connection.commit()
+    return row
+
+
 def claim_job(connection: psycopg.Connection, *, worker_id: str, lease_seconds: int = LEASE_SECONDS) -> dict[str, Any] | None:
     """Atomically lease one queued/expired job, using SKIP LOCKED for workers."""
     with connection.transaction():

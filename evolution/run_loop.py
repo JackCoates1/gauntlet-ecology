@@ -10,7 +10,7 @@ from typing import Any
 
 import psycopg
 
-from scheduler.worker import connect, enqueue_job, process_one, run_generation
+from scheduler.worker import connect, enqueue_job, process_one, reclaim_own_running_job, run_generation
 from strategygen.generator import CODEX_MODEL, invoke_codex
 
 from .engine import (
@@ -105,12 +105,16 @@ def run_loop(
             "attempts": attempts,
             "selection_policy": SELECTION_POLICY,
         }
-        enqueue_job(
+        job = enqueue_job(
             connection,
             job_type="run_evolution_generation",
             idempotency_key=f"evolution-generation:{challenge_semver}:{number}",
             payload_ref=json.dumps(payload, sort_keys=True),
         )
+        if job["status"] in {"leased", "running"} and job["lease_owner"] == worker_id:
+            # The previous process bearing this stable CLI worker ID died. Do
+            # not touch a lease owned by any other worker.
+            reclaim_own_running_job(connection, idempotency_key=job["idempotency_key"], worker_id=worker_id)
 
         def handler(job_connection: psycopg.Connection, job_payload: dict[str, Any]):
             return run_evolution_generation(

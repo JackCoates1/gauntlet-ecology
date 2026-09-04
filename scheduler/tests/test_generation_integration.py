@@ -203,13 +203,22 @@ def test_evolution_retry_after_mid_generation_crash_does_not_duplicate_rows(sche
             (crashed_generation["id"], crashed_generation["id"], crashed_generation["id"]),
         ).fetchone()
         assert before == {"agents": 1, "strategies": 1, "decisions": 1}
+        # Model the harsher failure mode where the process vanished before it
+        # could mark its job failed. The same stable CLI worker ID may reclaim
+        # only its own lease on rerun.
+        connection.execute(
+            """UPDATE jobs SET status = 'running', lease_owner = 'fixture-evolution-crash',
+               lease_until = now() + interval '15 minutes'
+               WHERE idempotency_key LIKE 'evolution-generation:%'"""
+        )
+        connection.commit()
 
         result = run_loop(
             connection,
             generations=1,
             max_model_calls=4,
             max_wall_seconds=300,
-            worker_id="fixture-evolution-retry",
+            worker_id="fixture-evolution-crash",
             invoker=_fixture_evolution_invoker,
             provider="fixture",
             model="fixture-v1",
