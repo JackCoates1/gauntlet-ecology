@@ -152,7 +152,7 @@ def test_evolution_loop_records_real_lineage_across_two_generations(scheduler_da
         assert len(decisions) == 2
         assert all(len(row["eligible_match_ids"]) >= 1 for row in decisions)
         assert all(len(row["selected_parent_strategy_ids"]) == 2 for row in decisions)
-        assert all(row["aggregate_metrics"]["policy"] == "top-per-role-score-last-k-v1" for row in decisions)
+        assert all(row["aggregate_metrics"]["policy"] == "top-per-role-avg-fitness-last-k-v1" for row in decisions)
         for decision in decisions:
             parent_count = connection.execute(
                 "SELECT count(*) AS count FROM strategies WHERE id = ANY(%s)",
@@ -193,7 +193,7 @@ def test_evolution_retry_after_mid_generation_crash_does_not_duplicate_rows(sche
                 match_executor=_fixture_match_executor,
             )
         crashed_generation = connection.execute(
-            "SELECT * FROM generations WHERE parent_selection_policy = 'top-per-role-score-last-k-v1' AND state = 'open'"
+            "SELECT * FROM generations WHERE parent_selection_policy = 'top-per-role-avg-fitness-last-k-v1' AND state = 'open'"
         ).fetchone()
         assert crashed_generation is not None
         before = connection.execute(
@@ -233,4 +233,11 @@ def test_evolution_retry_after_mid_generation_crash_does_not_duplicate_rows(sche
                FROM agents WHERE creation_generation_id = %s""",
             (crashed_generation["id"], crashed_generation["id"], crashed_generation["id"], crashed_generation["id"]),
         ).fetchone()
-        assert after == {"agents": 2, "strategies": 2, "decisions": 1, "matches": 1}
+        # The crash-and-resume path must not duplicate rows. The retried
+        # generation (number 4) also benchmarks each new candidate against its
+        # panel of recent generated (non-fixture) opposite-role parents: two
+        # generated attackers (generations 2 and 3) for the new defender, and
+        # two generated defenders (generations 2 and 3) for the new attacker.
+        # That is 1 head-to-head match + 2 + 2 benchmark matches = 5, still
+        # created exactly once despite the simulated crash and retry.
+        assert after == {"agents": 2, "strategies": 2, "decisions": 1, "matches": 5}

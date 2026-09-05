@@ -2,9 +2,21 @@
 
 The selection rule is deliberately small and inspectable: among scored matches
 from the last K closed generations on the same challenge version, retain the
-highest aggregate attacker and defender strategy.  Defender fitness includes
-availability points.  The selected source is attached to the next prompt as
-untrusted reference material, and all choices are recorded before model calls.
+highest average-fitness attacker and defender strategy (average, not sum, so a
+strategy is not favoured merely for having played more matches).  Defender
+fitness includes availability points.  The selected source is attached to the
+next prompt as untrusted reference material, and all choices are recorded
+before model calls.
+
+A single one-off match between a new attacker and a new defender cannot tell a
+genuinely stronger strategy apart from one that merely got a weak opponent
+this generation.  So after that head-to-head match, each new candidate is also
+benchmarked against a small fixed panel of the last few role-appropriate
+parents (see BENCHMARK_PANEL_SIZE) drawn from the same eligible-match window
+used for parent selection.  Those benchmark matches are ordinary matches
+(flagged ``is_benchmark``) and their scores feed back into the average-fitness
+ranking above once their generation closes, so future selection reflects
+performance across several opponents rather than a single draw.
 """
 
 from __future__ import annotations
@@ -30,7 +42,13 @@ from strategygen.run import (
 )
 
 
-SELECTION_POLICY = "top-per-role-score-last-k-v1"
+SELECTION_POLICY = "top-per-role-avg-fitness-last-k-v1"
+
+# Small, fixed number of recent role-appropriate parents each new candidate is
+# additionally played against, so selection fitness reflects more than one
+# opponent draw. Bounded deliberately: this is a benchmark panel, not a
+# round-robin tournament.
+BENCHMARK_PANEL_SIZE = 3
 
 
 class EvolutionCapReached(RuntimeError):
@@ -116,8 +134,26 @@ def _recent_scored_matches(
 
 
 def _ranked_parents(
-    connection: psycopg.Connection, *, eligible_match_ids: tuple[UUID, ...]
+    connection: psycopg.Connection,
+    *,
+    eligible_match_ids: tuple[UUID, ...],
+    panel_size: int = 1,
+    require_generated_source: bool = False,
 ) -> list[dict[str, Any]]:
+    """Rank strategies per role by average (not summed) fitness over eligible matches.
+
+    Averaging means a strategy is not favoured merely for having played more
+    matches than another (for example one that has already been through a few
+    benchmark pairings). ``panel_size`` controls how many top-ranked
+    strategies per role are returned: 1 for parent selection, or more to draw
+    a benchmark opponent panel from the same eligible window.
+
+    ``require_generated_source`` excludes the checked-in bootstrap fixtures
+    (``fixture://`` source URIs). Fixture "matches" are a canned, precomputed
+    event log rather than executed source (see scheduler/fixtures.py); the
+    sandbox has no interpreter to actually run a generated candidate against
+    one, so the benchmark panel is restricted to real generated opponents.
+    """
     if not eligible_match_ids:
         return []
     with connection.cursor() as cursor:
@@ -129,16 +165,19 @@ def _ranked_parents(
                 FROM matches AS m
                 JOIN scores AS s ON s.match_id = m.id
                 JOIN generations AS g ON g.id = m.generation_id
-                WHERE m.id = ANY(%s)
+                JOIN strategies AS st ON st.id = m.attacker_strategy_id
+                WHERE m.id = ANY(%s) AND (NOT %s OR st.source_bundle_uri LIKE 'file://%%')
                 UNION ALL
                 SELECT m.defender_strategy_id, 'defender'::text,
                        s.defender_points + s.availability_points, g.number
                 FROM matches AS m
                 JOIN scores AS s ON s.match_id = m.id
                 JOIN generations AS g ON g.id = m.generation_id
-                WHERE m.id = ANY(%s)
+                JOIN strategies AS st ON st.id = m.defender_strategy_id
+                WHERE m.id = ANY(%s) AND (NOT %s OR st.source_bundle_uri LIKE 'file://%%')
             ), aggregated AS (
-                SELECT strategy_id, role, sum(points) AS fitness, max(source_generation) AS source_generation
+                SELECT strategy_id, role, avg(points)::double precision AS fitness,
+                       count(*)::integer AS sample_size, max(source_generation) AS source_generation
                 FROM entries
                 GROUP BY strategy_id, role
             ), ranked AS (
@@ -147,10 +186,14 @@ def _ranked_parents(
                 ) AS position
                 FROM aggregated
             )
-            SELECT strategy_id, role, fitness::double precision AS fitness, source_generation
-            FROM ranked WHERE position = 1 ORDER BY role
+            SELECT strategy_id, role, fitness, sample_size, source_generation
+            FROM ranked WHERE position <= %s ORDER BY role, position
             """,
-            (list(eligible_match_ids), list(eligible_match_ids)),
+            (
+                list(eligible_match_ids), require_generated_source,
+                list(eligible_match_ids), require_generated_source,
+                panel_size,
+            ),
         )
         return cursor.fetchall()
 
@@ -264,6 +307,45 @@ def lineage_context(connection: psycopg.Connection, parent_ids: tuple[UUID, ...]
     return contexts
 
 
+def _benchmark_opponents(
+    connection: psycopg.Connection, *, eligible_match_ids: tuple[UUID, ...], panel_size: int = BENCHMARK_PANEL_SIZE
+) -> dict[str, tuple[UUID, ...]]:
+    """The last ``panel_size`` role-appropriate parents to benchmark a new candidate against.
+
+    Drawn from the same eligible-match window as parent selection, so "recent"
+    means the same thing in both places.
+    """
+    ranked = _ranked_parents(
+        connection, eligible_match_ids=eligible_match_ids, panel_size=panel_size, require_generated_source=True
+    )
+    panel: dict[str, list[UUID]] = {"attacker": [], "defender": []}
+    for row in ranked:
+        panel[row["role"]].append(row["strategy_id"])
+    return {role: tuple(ids) for role, ids in panel.items()}
+
+
+def _run_benchmark_matches(
+    connection: psycopg.Connection,
+    *,
+    generation: dict[str, Any],
+    candidate: dict[str, Any],
+    candidate_role: str,
+    opponent_ids: tuple[UUID, ...],
+    match_executor: Callable[[psycopg.Connection, UUID], None],
+) -> tuple[UUID, ...]:
+    """Play one new candidate against each opponent in its benchmark panel."""
+    match_ids = []
+    for opponent_id in opponent_ids:
+        opponent = {"id": opponent_id}
+        attacker_strategy, defender_strategy = (candidate, opponent) if candidate_role == "attacker" else (opponent, candidate)
+        match_id = schedule_generated_match(
+            connection, generation=generation, attacker_strategy=attacker_strategy, defender_strategy=defender_strategy, is_benchmark=True
+        )
+        match_executor(connection, match_id)
+        match_ids.append(match_id)
+    return tuple(match_ids)
+
+
 def run_evolution_generation(
     connection: psycopg.Connection,
     *,
@@ -322,6 +404,24 @@ def run_evolution_generation(
     with connection.cursor() as cursor:
         cursor.execute("SELECT * FROM scores WHERE match_id = %s", (match_id,))
         score = cursor.fetchone()
+    connection.commit()
+
+    # One head-to-head match cannot tell a genuinely stronger candidate apart
+    # from one that merely drew a weak partner this generation, so each
+    # candidate also plays a small fixed panel of recent opposite-role parents.
+    panel = _benchmark_opponents(connection, eligible_match_ids=selection.eligible_match_ids)
+    _run_benchmark_matches(
+        connection, generation=generation, candidate=attacker, candidate_role="attacker",
+        opponent_ids=panel["defender"], match_executor=match_executor,
+    )
+    _run_benchmark_matches(
+        connection, generation=generation, candidate=defender, candidate_role="defender",
+        opponent_ids=panel["attacker"], match_executor=match_executor,
+    )
+    if after_phase:
+        after_phase("benchmarks_recorded")
+
+    with connection.cursor() as cursor:
         cursor.execute("UPDATE generations SET state = 'closed', closed_at = COALESCE(closed_at, now()) WHERE id = %s", (generation["id"],))
     connection.commit()
     return RealGenerationSummary(generation["id"], generation["number"], attacker["id"], defender["id"], match_id, score)
