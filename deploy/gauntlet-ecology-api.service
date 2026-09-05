@@ -7,7 +7,8 @@ Wants=network-online.target
 Type=simple
 User=root
 WorkingDirectory=/root/gauntlet-ecology
-Environment=DATABASE_URL=postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology
+# Credentials (DATABASE_URL) come from the 0600 env file, not this unit.
+EnvironmentFile=/root/gauntlet-ecology/.env
 ExecStart=/root/gauntlet-ecology/.venv/bin/uvicorn api.main:app --host 192.168.8.150 --port 8001
 Restart=on-failure
 RestartSec=5

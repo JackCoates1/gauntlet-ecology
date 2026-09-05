@@ -5,8 +5,11 @@ import psycopg
 
 
 ROOT = Path(__file__).resolve().parents[2]
+# NOTE: this test DROPs and recreates the schema — it must never default to the
+# live database. The `_test` database is created by:
+# docker compose -f docker-compose.dev.yml exec postgres createdb -U gauntlet gauntlet_ecology_test
 DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology"
+    "TEST_DATABASE_URL", "postgresql://gauntlet@127.0.0.1:5432/gauntlet_ecology_test"
 )
 
 

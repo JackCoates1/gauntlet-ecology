@@ -15,7 +15,7 @@ Start a disposable development Postgres instance:
 
 ```bash
 docker compose -f docker-compose.dev.yml up -d
-export DATABASE_URL=postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology
+export DATABASE_URL=postgresql://gauntlet@127.0.0.1:5432/gauntlet_ecology
 ```
 
 Apply the schema and its small example challenge:
@@ -59,7 +59,7 @@ match and score rows.
 Run the integration tests against a fresh local schema (the database must be running):
 
 ```bash
-export TEST_DATABASE_URL=postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology_test
+export TEST_DATABASE_URL=postgresql://gauntlet@127.0.0.1:5432/gauntlet_ecology_test
 pytest
 ```
 

@@ -7,8 +7,11 @@ from psycopg_pool import ConnectionPool
 
 
 def database_url() -> str:
+    # Credentials are not baked into the repo: they come from the DATABASE_URL
+    # env var (see deploy/gauntlet-ecology-api.service EnvironmentFile) or,
+    # for local dev, from /root/.pgpass.
     return os.environ.get(
-        "DATABASE_URL", "postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology"
+        "DATABASE_URL", "postgresql://gauntlet_app@127.0.0.1:5432/gauntlet_ecology"
     )
 
 

@@ -35,7 +35,7 @@ class GenerationSummary:
 
 def connect(database_url: str | None = None) -> psycopg.Connection:
     return psycopg.connect(
-        database_url or os.environ.get("DATABASE_URL", "postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology"),
+        database_url or os.environ.get("DATABASE_URL", "postgresql://gauntlet@127.0.0.1:5432/gauntlet_ecology"),
         row_factory=dict_row,
     )
 

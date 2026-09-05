@@ -1,12 +1,17 @@
 services:
   postgres:
     image: postgres:16-alpine
+    # SECURITY: no host port publish at all. Only host-local consumers reach the
+    # DB via the compose network's published address on 127.0.0.1 below.
     environment:
       POSTGRES_DB: gauntlet_ecology
       POSTGRES_USER: gauntlet
-      POSTGRES_PASSWORD: gauntlet
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set in .env}
     ports:
-      - "5432:5432"
+      # Loopback-only publish: the host API (uvicorn on the host) connects via
+      # 127.0.0.1:5432. Nothing outside the host can reach this port.
+      - "127.0.0.1:5432:5432"
+    restart: unless-stopped
     volumes:
       - ./.postgres-data:/var/lib/postgresql/data
     healthcheck:
