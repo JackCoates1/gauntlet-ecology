@@ -205,16 +205,23 @@ def _generate_role(
     return None
 
 
-def schedule_generated_match(connection: psycopg.Connection, *, generation: dict[str, Any], attacker_strategy: dict[str, Any], defender_strategy: dict[str, Any]) -> UUID:
+def schedule_generated_match(
+    connection: psycopg.Connection,
+    *,
+    generation: dict[str, Any],
+    attacker_strategy: dict[str, Any],
+    defender_strategy: dict[str, Any],
+    is_benchmark: bool = False,
+) -> UUID:
     with connection.cursor() as cursor:
         cursor.execute(
             """INSERT INTO matches
-               (attacker_strategy_id, defender_strategy_id, generation_id, challenge_version_id, seed, status, sandbox_policy_version)
-               VALUES (%s, %s, %s, %s, %s, 'scheduled', %s)
+               (attacker_strategy_id, defender_strategy_id, generation_id, challenge_version_id, seed, status, sandbox_policy_version, is_benchmark)
+               VALUES (%s, %s, %s, %s, %s, 'scheduled', %s, %s)
                ON CONFLICT (attacker_strategy_id, defender_strategy_id, seed, challenge_version_id)
                DO UPDATE SET attacker_strategy_id = EXCLUDED.attacker_strategy_id
                RETURNING id""",
-            (attacker_strategy["id"], defender_strategy["id"], generation["id"], generation["challenge_version_id"], generation["random_seed"], SANDBOX_POLICY_VERSION),
+            (attacker_strategy["id"], defender_strategy["id"], generation["id"], generation["challenge_version_id"], generation["random_seed"], SANDBOX_POLICY_VERSION, is_benchmark),
         )
         match = cursor.fetchone()
     connection.commit()
