@@ -64,6 +64,11 @@ pytest
 ```
 
 Use a separate test database: API and scheduler fixtures recreate their schemas for each run.
+Create it once alongside the development container if it does not exist:
+
+```bash
+docker compose -f docker-compose.dev.yml exec postgres createdb -U gauntlet gauntlet_ecology_test
+```
 
 The collaborating tracks will document their runnable pieces in
 [`harness/README.md`](harness/README.md) and [`infra/README.md`](infra/README.md) when those
