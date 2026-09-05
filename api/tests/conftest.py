@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 ROOT = Path(__file__).resolve().parents[2]
 DATABASE_URL = os.environ.get(
-    "TEST_DATABASE_URL", "postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology"
+    "TEST_DATABASE_URL", "postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology_test"
 )
 
 
@@ -67,6 +67,13 @@ def reset_database() -> dict[str, str]:
             """
             INSERT INTO executions (match_id, stage, attempt, runner_image_digest, exit_reason)
             VALUES (%s, 'attack', 1, 'sha256:runner', 'completed')
+            """,
+            (match_id,),
+        )
+        connection.execute(
+            """
+            INSERT INTO events (match_id, sequence, virtual_timestamp, actor, action_type, redacted_payload, hash)
+            VALUES (%s, 0, 0, 'attacker', 'request', '{"technique": "token-guess", "response": "denied"}', 'sha256:test-event')
             """,
             (match_id,),
         )

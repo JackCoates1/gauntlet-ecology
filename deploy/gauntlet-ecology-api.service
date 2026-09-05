@@ -1,0 +1,18 @@
+[Unit]
+Description=Gauntlet Ecology read-only API and LAN web UI
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/gauntlet-ecology
+Environment=DATABASE_URL=postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology
+ExecStart=/root/gauntlet-ecology/.venv/bin/uvicorn api.main:app --host 192.168.8.150 --port 8001
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

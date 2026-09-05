@@ -59,9 +59,11 @@ match and score rows.
 Run the integration tests against a fresh local schema (the database must be running):
 
 ```bash
-export TEST_DATABASE_URL="$DATABASE_URL"
+export TEST_DATABASE_URL=postgresql://gauntlet:gauntlet@localhost:5432/gauntlet_ecology_test
 pytest
 ```
+
+Use a separate test database: API and scheduler fixtures recreate their schemas for each run.
 
 The collaborating tracks will document their runnable pieces in
 [`harness/README.md`](harness/README.md) and [`infra/README.md`](infra/README.md) when those

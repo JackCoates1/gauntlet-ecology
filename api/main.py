@@ -1,6 +1,7 @@
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, HTTPException
@@ -10,6 +11,7 @@ from psycopg import Connection
 from api.db import get_connection, pool
 
 WEB_DIRECTORY = Path(__file__).resolve().parents[1] / "web"
+STRATEGY_SOURCE_DIRECTORY = WEB_DIRECTORY.parent / "strategygen" / "generated"
 
 
 @asynccontextmanager
@@ -70,7 +72,7 @@ def get_generation(
             """
             SELECT s.id, s.agent_id, a.role, a.display_name, s.parent_strategy_ids,
                    s.manifest_version, s.source_bundle_hash, s.validation_status,
-                   s.policy_verdict, s.created_at
+                   s.policy_verdict, s.model_provenance, s.created_at
             FROM strategies AS s
             JOIN agents AS a ON a.id = s.agent_id
             WHERE s.generation_id = %s
@@ -203,6 +205,17 @@ def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) 
             (match_id,),
         )
         match["executions"] = cursor.fetchall()
+        cursor.execute(
+            """
+            SELECT sequence, virtual_timestamp, actor, action_type, redacted_payload,
+                   created_at
+            FROM events
+            WHERE match_id = %s
+            ORDER BY sequence
+            """,
+            (match_id,),
+        )
+        match["events"] = cursor.fetchall()
         return match
 
 
@@ -230,6 +243,135 @@ def leaderboard(connection: Connection = Depends(get_connection)) -> list[dict]:
             """
         )
         return cursor.fetchall()
+
+
+@app.get("/dashboard")
+def dashboard(connection: Connection = Depends(get_connection)) -> dict:
+    """Return concise live-range metrics for the product dashboard."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT g.id, g.number, g.state, cv.semver AS challenge_semver,
+                   count(m.id)::integer AS match_count
+            FROM generations AS g
+            JOIN challenge_versions AS cv ON cv.id = g.challenge_version_id
+            LEFT JOIN matches AS m ON m.generation_id = g.id
+            GROUP BY g.id, cv.semver
+            ORDER BY g.number DESC
+            LIMIT 1
+            """
+        )
+        current_generation = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT count(*)::integer AS completed_matches,
+                   count(DISTINCT m.generation_id)::integer AS scored_generations,
+                   count(*) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS attacker_wins,
+                   count(*) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS defender_wins
+            FROM matches AS m
+            JOIN scores AS s ON s.match_id = m.id
+            WHERE m.status = 'completed'
+            """
+        )
+        totals = cursor.fetchone()
+        cursor.execute(
+            """
+            SELECT 'attacker' AS role,
+                   count(*)::integer AS matches,
+                   count(*) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS wins,
+                   count(*) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS losses
+            FROM matches AS m JOIN scores AS s ON s.match_id = m.id
+            WHERE m.status = 'completed'
+            UNION ALL
+            SELECT 'defender' AS role,
+                   count(*)::integer AS matches,
+                   count(*) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS wins,
+                   count(*) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS losses
+            FROM matches AS m JOIN scores AS s ON s.match_id = m.id
+            WHERE m.status = 'completed'
+            """
+        )
+        role_records = cursor.fetchall()
+    return {
+        "current_generation": current_generation,
+        "totals": totals,
+        "role_records": role_records,
+    }
+
+
+@app.get("/evolution")
+def evolution(connection: Connection = Depends(get_connection)) -> list[dict]:
+    """Return the score history and selection metadata for every generation."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT g.id AS generation_id, g.number, g.state, cv.semver AS challenge_semver,
+                   g.opened_at, g.closed_at,
+                   count(s.id)::integer AS scored_matches,
+                   avg(s.attacker_points)::double precision AS average_attacker_points,
+                   avg(s.defender_points)::double precision AS average_confidentiality_points,
+                   avg(s.availability_points)::double precision AS average_availability_points,
+                   avg(s.defender_points + s.availability_points)::double precision AS average_defender_points,
+                   count(s.id) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS attacker_wins,
+                   count(s.id) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS defender_wins,
+                   sd.aggregate_metrics AS selection_metrics,
+                   sd.diversity_score::double precision AS diversity_score,
+                   sd.selected_parent_strategy_ids,
+                   sd.created_at AS selection_recorded_at
+            FROM generations AS g
+            JOIN challenge_versions AS cv ON cv.id = g.challenge_version_id
+            LEFT JOIN matches AS m ON m.generation_id = g.id AND m.status = 'completed'
+            LEFT JOIN scores AS s ON s.match_id = m.id
+            LEFT JOIN LATERAL (
+                SELECT aggregate_metrics, diversity_score, selected_parent_strategy_ids, created_at
+                FROM selection_decisions
+                WHERE generation_id = g.id
+                ORDER BY created_at, id
+                LIMIT 1
+            ) AS sd ON true
+            GROUP BY g.id, cv.semver, sd.aggregate_metrics, sd.diversity_score,
+                     sd.selected_parent_strategy_ids, sd.created_at
+            ORDER BY cv.semver, g.number
+            """
+        )
+        return cursor.fetchall()
+
+
+@app.get("/strategies/{strategy_id}/source")
+def get_strategy_source(
+    strategy_id: UUID, connection: Connection = Depends(get_connection)
+) -> dict:
+    """Read a generated strategy only when its database URI stays in the artifact directory."""
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            SELECT s.id, a.role, a.display_name, s.source_bundle_hash, s.source_bundle_uri,
+                   s.validation_status, s.policy_verdict, s.model_provenance
+            FROM strategies AS s JOIN agents AS a ON a.id = s.agent_id
+            WHERE s.id = %s
+            """,
+            (strategy_id,),
+        )
+        strategy = cursor.fetchone()
+    if strategy is None:
+        raise HTTPException(status_code=404, detail="strategy not found")
+
+    uri = urlparse(strategy.pop("source_bundle_uri"))
+    candidate = Path(unquote(uri.path)).resolve() if uri.scheme == "file" else None
+    try:
+        is_generated_source = candidate is not None and candidate.is_relative_to(STRATEGY_SOURCE_DIRECTORY.resolve())
+    except OSError:
+        is_generated_source = False
+    if not is_generated_source or not candidate.is_file():
+        strategy.update({"available": False, "source": None})
+        return strategy
+    try:
+        source = candidate.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        strategy.update({"available": False, "source": None})
+        return strategy
+    strategy.update({"available": True, "source": source})
+    return strategy
 
 
 # Mounted last so API and documentation routes continue to take precedence.
