@@ -79,8 +79,10 @@ def scenario_public_notes(scenario_config: Any = None) -> dict[str, tuple[str, s
         notes[f"note:decoy-{number}"] = (token, f"Decoy note {number}.")
     return notes
 
-# These labels describe distinct request-boundary probes.  They are metadata
-# supplied to the harness client, not part of the defender's API.
+# These labels describe distinct request-boundary probes.  They are optional
+# metadata supplied to the harness client, not part of the defender's API, and
+# they never drive competitive scoring: attack quality is derived from the
+# actually-distinct request patterns a strategy sent (see derive_request_pattern).
 VALID_ATTACK_TECHNIQUES = frozenset(
     {
         "admin-id-boundary",
@@ -100,6 +102,55 @@ VALID_ATTACK_TECHNIQUES = frozenset(
         "duplicate-separator-boundary",
     }
 )
+
+
+def normalize_note_id(note_id: Any) -> str | None:
+    """Return a comparable normalization of a boundary probe's note id."""
+    if not isinstance(note_id, str):
+        return None
+    # Whitespace-extended note ids are the note-prefix-boundary probe class;
+    # treat all whitespace variants as one observed pattern.
+    normalized = note_id.rstrip()
+    if normalized != note_id:
+        normalized += "<trailing-whitespace>"
+    return normalized
+
+
+def normalize_token(token: Any) -> str | None:
+    """Return a comparable normalization of a boundary probe's token."""
+    if not isinstance(token, str):
+        return "<non-string>"
+    if token == "":
+        return "<empty>"
+    left = token.lstrip()
+    right = token.rstrip()
+    if left != token or right != token:
+        return "<whitespace-padded>"
+    # Token value classes, not token values: reusing any documented public
+    # token is one reused-public-token pattern, not one per token value.
+    if token in {documented for documented, _ in PUBLIC_NOTES.values()}:
+        return "<public-token>"
+    if token.isdigit():
+        return "<numeric>"
+    if token.lower() != token:
+        return "<case-variant>"
+    if len(token) > 64:
+        return "<long>"
+    try:
+        token.encode("ascii")
+    except UnicodeEncodeError:
+        return "<unicode>"
+    return "<opaque-value>"
+
+
+def derive_request_pattern(note_id: Any, token: Any) -> tuple[str | None, str | None]:
+    """Return one normalized (note_id, token) pattern for a request pair.
+
+    Scoring derives attack quality from these observed patterns instead of
+    attacker-supplied technique labels, so repeating one identical request
+    under 15 different labels is still exactly one observed pattern.
+    """
+    return (normalize_note_id(note_id), normalize_token(token))
 
 
 def validate_request(note_id: Any, token: Any) -> str | None:
