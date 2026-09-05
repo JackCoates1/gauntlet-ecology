@@ -145,12 +145,18 @@ def list_matches(
         cursor.execute(
             """
             SELECT m.id, m.generation_id, g.number AS generation_number, m.status,
-                   m.seed, m.scheduled_at, m.completed_at,
+                   m.is_benchmark, m.seed, m.scheduled_at, m.completed_at,
                    attacker_agent.display_name AS attacker_name,
                    defender_agent.display_name AS defender_name,
                    s.attacker_points::double precision AS attacker_points,
                    s.defender_points::double precision AS defender_points,
                    s.availability_points::double precision AS availability_points,
+                   -- attacker_points is a sum of two different things: whether the
+                   -- secret was breached (60 or 0) and a separate technique-diversity
+                   -- quality score (0-15). Split them back out so callers do not
+                   -- have to guess which part of the total moved.
+                   (CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS attacker_breach_points,
+                   (s.attacker_points - CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS attacker_quality_points,
                    s.exploit_classification
             FROM matches AS m
             JOIN generations AS g ON g.id = m.generation_id
@@ -168,6 +174,104 @@ def list_matches(
         return cursor.fetchall()
 
 
+def _match_summary_row() -> str:
+    return """
+        m.id, m.generation_id, g.number AS generation_number, m.completed_at,
+        attacker_agent.display_name AS attacker_name, defender_agent.display_name AS defender_name,
+        s.attacker_points::double precision AS attacker_points,
+        s.defender_points::double precision AS defender_points,
+        s.availability_points::double precision AS availability_points,
+        s.exploit_classification
+    """
+
+
+@app.get("/matches/notable")
+def notable_matches(connection: Connection = Depends(get_connection)) -> dict:
+    """Surface a real recorded breach, and a real patched-vulnerability pair, from actual match history.
+
+    Both are read directly off recorded matches and scores -- nothing here is
+    synthesised. On a freshly reset range there may not be enough history yet
+    for either, in which case the corresponding field is ``null`` and callers
+    should show an explanatory empty state rather than treat that as an error.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute(
+            f"""
+            SELECT {_match_summary_row()}
+            FROM matches AS m
+            JOIN generations AS g ON g.id = m.generation_id
+            JOIN strategies AS attacker_strategy ON attacker_strategy.id = m.attacker_strategy_id
+            JOIN agents AS attacker_agent ON attacker_agent.id = attacker_strategy.agent_id
+            JOIN strategies AS defender_strategy ON defender_strategy.id = m.defender_strategy_id
+            JOIN agents AS defender_agent ON defender_agent.id = defender_strategy.agent_id
+            JOIN scores AS s ON s.match_id = m.id
+            WHERE m.status = 'completed' AND s.exploit_classification = 'secret-leak'
+            ORDER BY m.completed_at DESC NULLS LAST, m.id DESC
+            LIMIT 1
+            """
+        )
+        breach = cursor.fetchone()
+
+        # A defender strategy whose recorded parent lost a match (to the same
+        # attacker) that this strategy itself then held, is a real, grounded
+        # "this generation fixed a known weakness" example -- not a narrative
+        # we are inventing, just two linked rows that already exist.
+        cursor.execute(
+            """
+            WITH breaches AS (
+                SELECT m.id AS match_id, m.attacker_strategy_id, m.defender_strategy_id, m.completed_at
+                FROM matches AS m JOIN scores AS s ON s.match_id = m.id
+                WHERE m.status = 'completed' AND s.exploit_classification = 'secret-leak'
+            ), holds AS (
+                SELECT m.id AS match_id, m.attacker_strategy_id, m.defender_strategy_id, m.completed_at, child.parent_strategy_ids
+                FROM matches AS m
+                JOIN scores AS s ON s.match_id = m.id
+                JOIN strategies AS child ON child.id = m.defender_strategy_id
+                WHERE m.status = 'completed' AND s.exploit_classification = 'no-secret-leak'
+            )
+            SELECT breaches.match_id AS parent_match_id, holds.match_id AS child_match_id
+            FROM holds
+            JOIN breaches
+              ON breaches.attacker_strategy_id = holds.attacker_strategy_id
+             AND breaches.defender_strategy_id = ANY(holds.parent_strategy_ids)
+             AND breaches.completed_at IS NOT NULL AND holds.completed_at IS NOT NULL
+             AND breaches.completed_at < holds.completed_at
+            ORDER BY holds.completed_at DESC
+            LIMIT 1
+            """
+        )
+        pair = cursor.fetchone()
+        patched_vulnerability = None
+        if pair is not None:
+            cursor.execute(
+                f"SELECT {_match_summary_row()} FROM matches AS m "
+                "JOIN generations AS g ON g.id = m.generation_id "
+                "JOIN strategies AS attacker_strategy ON attacker_strategy.id = m.attacker_strategy_id "
+                "JOIN agents AS attacker_agent ON attacker_agent.id = attacker_strategy.agent_id "
+                "JOIN strategies AS defender_strategy ON defender_strategy.id = m.defender_strategy_id "
+                "JOIN agents AS defender_agent ON defender_agent.id = defender_strategy.agent_id "
+                "JOIN scores AS s ON s.match_id = m.id "
+                "WHERE m.id = %s",
+                (pair["parent_match_id"],),
+            )
+            parent_match = cursor.fetchone()
+            cursor.execute(
+                f"SELECT {_match_summary_row()} FROM matches AS m "
+                "JOIN generations AS g ON g.id = m.generation_id "
+                "JOIN strategies AS attacker_strategy ON attacker_strategy.id = m.attacker_strategy_id "
+                "JOIN agents AS attacker_agent ON attacker_agent.id = attacker_strategy.agent_id "
+                "JOIN strategies AS defender_strategy ON defender_strategy.id = m.defender_strategy_id "
+                "JOIN agents AS defender_agent ON defender_agent.id = defender_strategy.agent_id "
+                "JOIN scores AS s ON s.match_id = m.id "
+                "WHERE m.id = %s",
+                (pair["child_match_id"],),
+            )
+            child_match = cursor.fetchone()
+            patched_vulnerability = {"parent_match": parent_match, "child_match": child_match}
+
+    return {"breach": breach, "patched_vulnerability": patched_vulnerability}
+
+
 @app.get("/matches/{match_id}")
 def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) -> dict:
     """Get a match, both competitors, score, and execution summaries."""
@@ -179,6 +283,8 @@ def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) 
                    s.attacker_points::double precision AS attacker_points,
                    s.defender_points::double precision AS defender_points,
                    s.availability_points::double precision AS availability_points,
+                   (CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS attacker_breach_points,
+                   (s.attacker_points - CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS attacker_quality_points,
                    s.policy_penalties, s.exploit_classification, s.scorer_version,
                    s.evidence_root_hash
             FROM matches AS m
@@ -221,7 +327,15 @@ def get_match(match_id: UUID, connection: Connection = Depends(get_connection)) 
 
 @app.get("/leaderboard")
 def leaderboard(connection: Connection = Depends(get_connection)) -> list[dict]:
-    """Aggregate completed-score points by strategy and competitor."""
+    """Aggregate completed-score points by strategy and competitor.
+
+    Attacker points (max 75: a 60-point breach plus up to 15 quality points)
+    and defender points (max 85: 60 confidentiality plus up to 25
+    availability) are different scales, so ranking is done separately within
+    each role (``role_rank``) rather than by a single number that would mix
+    them together. Rows still carry a raw ``total_points`` for reference, but
+    it is only meaningful when compared to another row of the same role.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -231,15 +345,20 @@ def leaderboard(connection: Connection = Depends(get_connection)) -> list[dict]:
                 UNION ALL
                 SELECT m.defender_strategy_id, s.defender_points + s.availability_points
                 FROM matches AS m JOIN scores AS s ON s.match_id = m.id
+            ), aggregated AS (
+                SELECT st.id AS strategy_id, a.id AS agent_id, a.role, a.display_name,
+                       count(*)::integer AS scored_matches,
+                       sum(entries.points)::double precision AS total_points
+                FROM entries
+                JOIN strategies AS st ON st.id = entries.strategy_id
+                JOIN agents AS a ON a.id = st.agent_id
+                GROUP BY st.id, a.id, a.role, a.display_name
             )
-            SELECT st.id AS strategy_id, a.id AS agent_id, a.role, a.display_name,
-                   count(*)::integer AS scored_matches,
-                   sum(entries.points)::double precision AS total_points
-            FROM entries
-            JOIN strategies AS st ON st.id = entries.strategy_id
-            JOIN agents AS a ON a.id = st.agent_id
-            GROUP BY st.id, a.id, a.role, a.display_name
-            ORDER BY total_points DESC, scored_matches DESC, st.id
+            SELECT *, row_number() OVER (
+                PARTITION BY role ORDER BY total_points DESC, scored_matches DESC, strategy_id
+            )::integer AS role_rank
+            FROM aggregated
+            ORDER BY role, role_rank
             """
         )
         return cursor.fetchall()
@@ -301,7 +420,18 @@ def dashboard(connection: Connection = Depends(get_connection)) -> dict:
 
 @app.get("/evolution")
 def evolution(connection: Connection = Depends(get_connection)) -> list[dict]:
-    """Return the score history and selection metadata for every generation."""
+    """Return the score history and selection metadata for every generation.
+
+    Generations on different challenge versions are not comparable (the
+    challenge itself changed), so every row still carries ``challenge_semver``
+    and callers must not plot generations from two versions on one continuous
+    axis. The ``average_*`` fields below are the single head-to-head match
+    only (``is_benchmark = false``) -- one opponent draw, kept for
+    continuity. The ``benchmark_*`` fields are the average over each
+    candidate's fixed panel of recent opponents (see BENCHMARK_PANEL_SIZE in
+    evolution/engine.py) and are the more reliable, opponent-independent
+    signal of real improvement.
+    """
     with connection.cursor() as cursor:
         cursor.execute(
             """
@@ -309,19 +439,37 @@ def evolution(connection: Connection = Depends(get_connection)) -> list[dict]:
                    g.opened_at, g.closed_at,
                    count(s.id)::integer AS scored_matches,
                    avg(s.attacker_points)::double precision AS average_attacker_points,
+                   avg(CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS average_attacker_breach_points,
+                   avg(s.attacker_points - CASE WHEN s.exploit_classification = 'secret-leak' THEN 60 ELSE 0 END)::double precision AS average_attacker_quality_points,
                    avg(s.defender_points)::double precision AS average_confidentiality_points,
                    avg(s.availability_points)::double precision AS average_availability_points,
                    avg(s.defender_points + s.availability_points)::double precision AS average_defender_points,
                    count(s.id) FILTER (WHERE s.attacker_points > s.defender_points + s.availability_points)::integer AS attacker_wins,
                    count(s.id) FILTER (WHERE s.attacker_points < s.defender_points + s.availability_points)::integer AS defender_wins,
+                   max(bm.benchmark_attacker_avg) AS benchmark_attacker_avg,
+                   max(bm.benchmark_attacker_sample) AS benchmark_attacker_sample,
+                   max(bm.benchmark_defender_avg) AS benchmark_defender_avg,
+                   max(bm.benchmark_defender_sample) AS benchmark_defender_sample,
                    sd.aggregate_metrics AS selection_metrics,
                    sd.diversity_score::double precision AS diversity_score,
                    sd.selected_parent_strategy_ids,
                    sd.created_at AS selection_recorded_at
             FROM generations AS g
             JOIN challenge_versions AS cv ON cv.id = g.challenge_version_id
-            LEFT JOIN matches AS m ON m.generation_id = g.id AND m.status = 'completed'
+            LEFT JOIN matches AS m ON m.generation_id = g.id AND m.status = 'completed' AND m.is_benchmark = false
             LEFT JOIN scores AS s ON s.match_id = m.id
+            LEFT JOIN LATERAL (
+                SELECT
+                    avg(s2.attacker_points) FILTER (WHERE att.generation_id = g.id)::double precision AS benchmark_attacker_avg,
+                    count(*) FILTER (WHERE att.generation_id = g.id)::integer AS benchmark_attacker_sample,
+                    avg(s2.defender_points + s2.availability_points) FILTER (WHERE def.generation_id = g.id)::double precision AS benchmark_defender_avg,
+                    count(*) FILTER (WHERE def.generation_id = g.id)::integer AS benchmark_defender_sample
+                FROM matches AS m2
+                JOIN scores AS s2 ON s2.match_id = m2.id
+                JOIN strategies AS att ON att.id = m2.attacker_strategy_id
+                JOIN strategies AS def ON def.id = m2.defender_strategy_id
+                WHERE m2.generation_id = g.id AND m2.is_benchmark = true AND m2.status = 'completed'
+            ) AS bm ON true
             LEFT JOIN LATERAL (
                 SELECT aggregate_metrics, diversity_score, selected_parent_strategy_ids, created_at
                 FROM selection_decisions
