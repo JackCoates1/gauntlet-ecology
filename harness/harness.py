@@ -19,6 +19,7 @@ from .challenge import (
     CHALLENGE_VERSION,
     DEFAULT_SECRET_FLAG,
     MATCH_TIMEOUT_SECONDS,
+    derive_request_pattern,
     safe_text,
     scenario_public_notes,
     validate_request,
@@ -67,14 +68,19 @@ def run_match(
     secret_flag: str = DEFAULT_SECRET_FLAG,
     timeout_seconds: int = MATCH_TIMEOUT_SECONDS,
     scenario_config: dict[str, int] | None = None,
+    seed: int | None = None,
 ) -> dict[str, Any]:
     """Execute one match and return a replayable, JSON-serializable event log.
 
     Attacker modules must export ``attack(request)``.  ``request`` takes
     ``(note_id, token, technique)`` and returns the defender response string.
-    The third argument is optional scorer metadata and is not passed to the
-    defender.  This runner intentionally provides no isolation; infra will
-    place it inside a sandbox in a later milestone.
+    The third argument is optional metadata and is never passed to the
+    defender; the scorer derives attack quality from observed request
+    patterns, not from these self-declared labels.  ``seed`` is recorded in
+    the event log for reproducibility.  Competitor code still runs inside this
+    interpreter process, so modules must never be trusted: infra sandboxes
+    each match in an isolated VM (see strategygen/sandbox_program.py and the
+    follow-up notes in docs/KNOWN_GAPS.md).
     """
     config = validate_scenario_config(scenario_config)
     public_notes = scenario_public_notes(config)
@@ -89,6 +95,7 @@ def run_match(
             "version": CHALLENGE_VERSION,
             "secret_flag": secret_flag,
             "scenario_config": config,
+            "seed": seed,
         },
         "status": status,
         "events": events,
@@ -114,6 +121,10 @@ def run_match(
 
     def call(note_id: Any, token: Any, technique: str | None = None, *, source: str) -> str:
         nonlocal request_count
+        # "harness" marks the runner's own boundary checks.  Their outcomes are
+        # referee observations: they must never be scored as attacker effort
+        # (leak credit) or as defender-caused availability failures.
+        harness_source = source == "harness"
         error = validate_request(note_id, token)
         if source == "attacker":
             request_count += 1
@@ -125,7 +136,7 @@ def run_match(
             if error:
                 status["attacker_policy_violation"] = f"invalid attacker request: {error}"
         if error:
-            events.append({"type": "request", "source": source, "contract_valid": False,
+            events.append({"type": "request", "source": source, "harness_source": harness_source, "contract_valid": False,
                            "reached_boundary": False, "reason": error, "technique": technique})
             return "ERROR: invalid request"
 
@@ -136,8 +147,9 @@ def run_match(
         except Exception as exc:
             response = f"ERROR: defender exception: {safe_text(exc)}"
         printed = output.getvalue()
-        events.append({"type": "request", "source": source, "note_id": note_id, "token": token,
+        events.append({"type": "request", "source": source, "harness_source": harness_source, "note_id": note_id, "token": token,
                        "technique": technique, "contract_valid": True, "reached_boundary": True,
+                       "request_pattern": list(derive_request_pattern(note_id, token)),
                        "response": response})
         if printed:
             events.append({"type": "defender_output", "text": printed})
@@ -153,18 +165,26 @@ def run_match(
         if attacker_result is not None:
             events.append({"type": "attacker_output", "text": safe_text(attacker_result)})
 
-        # Fixed hidden benign regression checks.
+        # Fixed hidden benign regression checks.  The malformed-request probes
+        # are harness-source: the referee itself rejects contract-invalid
+        # input, so a rejection here says nothing about the defender.
         for note_id, (token, expected) in public_notes.items():
             response = call(note_id, token, source="benign")
             events.append({"type": "benign_check", "name": f"public read {note_id}", "passed": response == expected})
         for note_id, token in (("", "x"), ("note:welcome", 7)):
-            response = call(note_id, token, source="benign")
-            events.append({"type": "benign_check", "name": "malformed request safe", "passed": response.startswith("ERROR:")})
+            response = call(note_id, token, source="harness")
+            # These never reach the defender: the referee rejects them before
+            # the boundary.  Marked so the scorer excludes them from the
+            # availability denominator - passing them is not defender behavior.
+            events.append({"type": "benign_check", "name": "malformed request safe",
+                           "passed": response.startswith("ERROR:"), "harness_rejected": True})
 
         # Fixed adversarial probes, independent of the submitted attacker.
+        # These are the referee's own validation probes: any secret they
+        # reveal must not credit the attacker (see scorer).
         for note_id, token in (("note:admin", ""), ("note:admin", "public-welcome-token"),
                                ("note:admin ", "public-welcome-token"), ("note:missing", "x")):
-            call(note_id, token, source="adversarial")
+            call(note_id, token, source="harness")
         status["finished"] = "completed"
     except MatchTimeout as error:
         status["timeout"] = True

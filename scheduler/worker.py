@@ -15,6 +15,7 @@ from uuid import UUID
 import psycopg
 from psycopg.rows import dict_row
 
+from harness.challenge import DEFAULT_SCENARIO_CONFIG, validate_scenario_config
 from harness.scorer import score_event_log
 from scheduler.fixtures import FIXTURES, fixture_pairs, sandbox_program
 from scheduler.sandbox import SandboxResult, run as run_sandbox
@@ -304,7 +305,7 @@ def _record_score(connection: psycopg.Connection, match_id: UUID, event_log: dic
         "harness_total": score["total"],
         "leaked": score["leaked"],
         "reasons": score["reasons"],
-        "attack_techniques": score["attack_quality"]["techniques"],
+        "attack_request_patterns": score["attack_quality"]["request_patterns"],
         "benign_checks": score["availability"],
     }
     with connection.cursor() as cursor:
@@ -327,6 +328,40 @@ def _record_score(connection: psycopg.Connection, match_id: UUID, event_log: dic
                 evidence_root_hash,
             ),
         )
+
+
+def load_scenario_config(connection: psycopg.Connection, challenge_version_id: UUID) -> tuple[dict[str, int] | None, dict[str, Any]]:
+    """Load a challenge version's stored scenario_config and metadata row.
+
+    Returns the normalized scenario config (or None for the compatibility
+    baseline) plus the raw challenge-version row.  Raises ValueError when a
+    stored config is malformed so bad builder output fails loudly at match
+    time instead of silently running the default scenario.
+    """
+    with connection.cursor() as cursor:
+        cursor.execute("SELECT * FROM challenge_versions WHERE id = %s", (challenge_version_id,))
+        challenge = cursor.fetchone()
+    if challenge is None:
+        raise ValueError(f"challenge version {challenge_version_id} does not exist")
+    raw = challenge["scenario_config"]
+    if raw is None or raw == {}:
+        return None, challenge
+    # schema/seed.sql's baseline row stores metadata (challenge id, contract
+    # descriptions) alongside execution controls, and it predates decoy and
+    # token-length controls entirely.  The strict validator only accepts the
+    # three execution controls with every field present, so extract the
+    # execution subset and fill any absent control from the documented
+    # baseline defaults before validating.  Unknown execution-looking fields
+    # still fail validation, so malformed builder output cannot sneak through.
+    execution_controls = {
+        key: raw[key]
+        for key in ("request_budget", "decoy_note_count", "token_length")
+        if key in raw
+    }
+    defaults = DEFAULT_SCENARIO_CONFIG
+    for key, default in defaults.items():
+        execution_controls.setdefault(key, default)
+    return validate_scenario_config(execution_controls), challenge
 
 
 def execute_match(connection: psycopg.Connection, match_id: UUID, *, sandbox_runner: Callable[[str], SandboxResult] = run_sandbox) -> None:
@@ -359,6 +394,11 @@ def execute_match(connection: psycopg.Connection, match_id: UUID, *, sandbox_run
     connection.commit()
 
     secret = f"FLAG{{generation-{match['generation_id']}-match-{match_id}}}"
+    # A match runs under its challenge version's stored scenario and its own
+    # persisted seed.  Previously both were silently dropped, so scheduled
+    # matches always executed the default baseline.
+    scenario_config, _challenge = load_scenario_config(connection, match["challenge_version_id"])
+    seed = int(match["seed"])
     attacker = next((item for item in FIXTURES if item.source_uri == match["attacker_uri"]), None)
     defender = next((item for item in FIXTURES if item.source_uri == match["defender_uri"]), None)
     if attacker is not None and defender is not None:
@@ -378,6 +418,8 @@ def execute_match(connection: psycopg.Connection, match_id: UUID, *, sandbox_run
             defender_source=read_generated(match["defender_uri"], "defender"),
             mode="match",
             secret=secret,
+            scenario_config=scenario_config,
+            seed=seed,
         )
     sandbox_result = sandbox_runner(program)
     evidence_root_hash = _insert_events(connection, match_id, sandbox_result.event_log)

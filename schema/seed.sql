@@ -11,7 +11,11 @@ INSERT INTO challenge_versions (
     'harness/protected-note-vault@1.0',
     'sha256:pending-harness-image-digest',
     '{"mode":"deterministic-per-match","seed_source":"matches.seed"}'::jsonb,
-    '{"scenario":"protected-note-vault","harness_event_log_version":"1.0","objective":"attacker attempts the protected note boundary while defender preserves confidentiality and availability","defender_contract":"read_note(note_id, token) -> str","attacker_contract":"attack(request)","request_budget":20,"notes":{"storage":"ephemeral fixture vault","network":"isolated sandbox"}}'::jsonb,
+    -- Baseline execution controls in the exact shape the harness's strict
+    -- scenario validator accepts.  The original row mixed descriptive
+    -- metadata into this field, which made the stored baseline incompatible
+    -- with the validator and silently ran the defaults instead.
+    '{"request_budget":20,"decoy_note_count":0,"token_length":16}'::jsonb,
     '1.0',
     'Protected Note Vault: attack and defend an isolated note service while preserving access controls and availability.'
 ) ON CONFLICT (semver) DO NOTHING;

@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import gzip
 import io
+import json
 import tarfile
 from pathlib import Path
 
@@ -23,6 +24,12 @@ import uuid
 from pathlib import Path
 
 sys.path.insert(0, "/scratch/strategy")
+
+# Match payloads arrive on stdin as a gzip+base64 JSON envelope; argv never
+# carries the secret, so process listings inside the sandbox cannot leak it.
+def read_match_envelope() -> dict:
+    return json.loads(sys.stdin.read())
+
 
 from harness.challenge import CHALLENGE_ID, CHALLENGE_VERSION
 from harness.harness import run_match
@@ -51,7 +58,16 @@ def event_log_for_smoke(role: str):
 
 mode = sys.argv[1]
 if mode == "match":
-    event_log = run_match("/scratch/strategy/defender.py", "/scratch/strategy/attacker.py", secret_flag=sys.argv[2])
+    envelope = read_match_envelope()
+    if envelope.get("mode") != "match":
+        raise ValueError("stdin envelope must be a match envelope")
+    event_log = run_match(
+        "/scratch/strategy/defender.py",
+        "/scratch/strategy/attacker.py",
+        secret_flag=envelope["secret_flag"],
+        scenario_config=envelope.get("scenario_config"),
+        seed=envelope.get("seed"),
+    )
 elif mode == "smoke":
     event_log = event_log_for_smoke(sys.argv[2])
 else:
@@ -76,8 +92,13 @@ def _bundle(files: dict[str, bytes]) -> str:
     return base64.b64encode(compressed).decode()
 
 
-def sandbox_program(*, attacker_source: str, defender_source: str, mode: str, secret: str | None = None, smoke_role: str | None = None) -> str:
-    """Return a BusyBox launcher; Python sources execute only after the sandbox chroot."""
+def sandbox_program(*, attacker_source: str, defender_source: str, mode: str, secret: str | None = None, smoke_role: str | None = None, scenario_config: dict[str, int] | None = None, seed: int | None = None) -> str:
+    """Return a BusyBox launcher; Python sources execute only after the sandbox chroot.
+
+    In match mode the secret travels inside the serialized stdin envelope, not
+    on the runner command line: process listings inside the sandbox would
+    otherwise expose it to every process and to any code reading /proc.
+    """
     if mode not in {"match", "smoke"}:
         raise ValueError("mode must be match or smoke")
     if mode == "match" and secret is None:
@@ -94,7 +115,17 @@ def sandbox_program(*, attacker_source: str, defender_source: str, mode: str, se
             "runner.py": _RUNNER.encode(),
         }
     )
-    args = "match " + _shell_quote(secret) if mode == "match" else "smoke " + _shell_quote(smoke_role or "")
+    if mode == "match":
+        envelope = {
+            "mode": "match",
+            "secret_flag": secret,
+            "scenario_config": scenario_config,
+            "seed": seed,
+        }
+        envelope_b64 = base64.b64encode(gzip.compress(json.dumps(envelope, sort_keys=True, separators=(",", ":")).encode(), mtime=0)).decode()
+        final_line = "/bin/busybox base64 -d <<'ECOLOGY_MATCH_ENVELOPE' | /bin/busybox gunzip | /usr/bin/python3 -I /scratch/strategy/runner.py match\n" + envelope_b64 + "\nECOLOGY_MATCH_ENVELOPE"
+    else:
+        final_line = "exec /usr/bin/python3 -I /scratch/strategy/runner.py smoke " + _shell_quote(smoke_role or "")
     return "\n".join(
         (
             "#!/bin/sh",
@@ -103,7 +134,7 @@ def sandbox_program(*, attacker_source: str, defender_source: str, mode: str, se
             "/bin/busybox base64 -d <<'ECOLOGY_STRATEGY_ARCHIVE' | /bin/busybox gunzip | /bin/busybox tar -x -C /scratch/strategy",
             payload,
             "ECOLOGY_STRATEGY_ARCHIVE",
-            f"exec /usr/bin/python3 -I /scratch/strategy/runner.py {args}",
+            final_line,
         )
     )
 

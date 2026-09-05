@@ -17,6 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from harness.challenge import derive_request_pattern
+
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_DIR = ROOT / "harness" / "fixtures"
@@ -83,11 +85,13 @@ def _request(
     return {
         "type": "request",
         "source": source,
+        "harness_source": source == "harness",
         "note_id": note_id,
         "token": token,
         "technique": technique,
         "contract_valid": True,
         "reached_boundary": True,
+        "request_pattern": list(derive_request_pattern(note_id, token)),
         "response": response,
     }
 
@@ -114,16 +118,18 @@ def fixture_event_log(
         events.append(event)
         events.append({"type": "benign_check", "name": f"public read {note_id}", "passed": event["response"] == expected})
     for note_id, token in (("", "x"), ("note:welcome", "7")):
-        # These are contract-invalid in the Python harness and never reach a defender.
-        events.append({"type": "request", "source": "benign", "contract_valid": False, "reached_boundary": False, "reason": "invalid request", "technique": None})
-        events.append({"type": "benign_check", "name": "malformed request safe", "passed": True})
+        # These are contract-invalid and are rejected by the harness itself in
+        # the Python runner; they never reach a defender, so they are recorded
+        # as harness-source and excluded from defender availability scoring.
+        events.append({"type": "request", "source": "harness", "harness_source": True, "contract_valid": False, "reached_boundary": False, "reason": "invalid request", "technique": None})
+        events.append({"type": "benign_check", "name": "malformed request safe", "passed": True, "harness_rejected": True})
     for note_id, token in (
         ("note:admin", ""),
         ("note:admin", "public-welcome-token"),
         ("note:admin ", "public-welcome-token"),
         ("note:missing", "x"),
     ):
-        events.append(_request(note_id, token, source="adversarial", defender=defender, secret=secret))
+        events.append(_request(note_id, token, source="harness", defender=defender, secret=secret))
 
     return {
         "event_log_version": "1.0",
